@@ -1,34 +1,51 @@
 cmake_minimum_required(VERSION 3.10)
 
-# A projekt neve és a nyelv (C++)
 project(ParallelAlgorithmsLab CXX)
 
-# Generálja le a fordítási parancsok adatbázisát (ez kell a kódelemzőknek)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Bekapcsoljuk a clang-tidy-t a build folyamatba
-set(CMAKE_CXX_CLANG_TIDY "clang-tidy")
-
-# Használjunk modern C++17 szabványt
+# Modern C++17 és Clang kényszerítése
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
-
-# Kényszerítjük a rendszert, hogy a Clang-ot használja
 set(CMAKE_CXX_COMPILER "clang++")
 
-# Megkeressük az OpenMP csomagot
+# Megkeressük az OpenMP-t
 find_package(OpenMP REQUIRED)
 
-# 1. ÚJÍTÁS: Összegyűjtjük az összes .cpp fájlt az src mappából egy SOURCES nevű változóba
-file(GLOB SOURCES "src/*.cpp")
+# --- BUILD TÍPUSOK KONFIGURÁCIÓJA ---
 
-# 2. ÚJÍTÁS: A futtatható fájlt most már az src mappából kigyűjtött fájlokból rakjuk össze
+# Ha nincs megadva build típus, legyen alapból Debug
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Debug)
+endif()
+
+# 1. DEBUG: Nincs optimalizálás, sok infó a hibakereséshez
+set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -Wall -Wextra")
+
+# 2. FAST_TEST (Gyors tesztelés): Közepes optimalizálás, gyors fordítás
+# Itt a RelWithDebInfo-t használjuk alapnak
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g")
+
+# 3. MEASURE (A méréshez): Maximális sebesség, hardver-specifikus optimalizálás
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG")
+
+# Clang-tidy: Csak Debug és FastTest módban futtatjuk, hogy a mérést ne zavarja
+if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    set(CMAKE_CXX_CLANG_TIDY "clang-tidy")
+else()
+    unset(CMAKE_CXX_CLANG_TIDY CACHE)
+endif()
+
+# --- FORRÁSFÁJLOK ÉS CÉLOK ---
+
+file(GLOB SOURCES "src/*.cpp")
 add_executable(parallel_lab ${SOURCES})
 
-# Megadjuk, hogy az "include" mappában keresse a fejléceket
 target_include_directories(parallel_lab PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-# Ha megtalálta az OpenMP-t, hozzákapcsoljuk a futtatható fájlunkhoz
 if(OpenMP_CXX_FOUND)
     target_link_libraries(parallel_lab PUBLIC OpenMP::OpenMP_CXX)
 endif()
+
+# Kiírjuk, épp melyik módban vagyunk, hogy ne legyen kavarodás
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")

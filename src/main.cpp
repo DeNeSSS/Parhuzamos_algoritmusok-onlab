@@ -1,14 +1,19 @@
 #include <iostream>
+#include <cstdlib>
 
-#include"OpenMP_examples_FOR.cpp"
-#include"OpenMP-examples.cpp"
+#include "OpenMP_examples_FOR.h"
+#include "threadPool.h"
+#include "minSearch.h"
+#include "tester.h"
+
+using namespace std;
+
 
 int main()
 {
-    // std::cout << "FOR loop examples" << std::endl;
-    // run_FOR_examples();
-    std::cout << "Hello World example" << std::endl;
-    example_1();
+
+    minSearch::testMinSearchAlgorithms(1000000, 10);
+
 
     return 0;
 }

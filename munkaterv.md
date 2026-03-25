@@ -15,6 +15,6 @@
 
 ## Haladási napló
 ### 1. hét:
-- Ismerekedés az openMP-vel 
+- Ismerekedés az az std::thread-del és az openMP-vel 
   - [1. weboldal](https://www.geeksforgeeks.org/cpp/introduction-to-parallel-programming-with-openmp-in-cpp/)
   - [2. weboldal](https://www.geeksforgeeks.org/c/openmp-hello-world-program/)

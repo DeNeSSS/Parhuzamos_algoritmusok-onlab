@@ -1,4 +1,3 @@
 Checks: '-*,modernize-*,readability-*,performance-*,bugprone-*,clang-analyzer-*'
 WarningsAsErrors: ''
 HeaderFilterRegex: ''
-AnalyzeTemporaryDtors: false

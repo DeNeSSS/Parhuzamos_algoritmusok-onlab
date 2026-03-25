@@ -1,6 +1,11 @@
 #include <chrono>
 #include <iostream>
 #include <omp.h>
+#include <thread>
+#include <atomic>
+
+#include "OpenMP_examples_FOR.h"
+#include <vector>
 
 // ===== Example 1 =====
 
@@ -14,7 +19,7 @@ int sum_serial(int n)
 }
 
 // Parallel programming function
-int sum_parallel(int n)
+int openMP_sum_parallel(int n)
 {
     int sum = 0;
 #pragma omp parallel for reduction(+ : sum)
@@ -24,39 +29,77 @@ int sum_parallel(int n)
     return sum;
 }
 
+void partial_sum(int start, int end, std::atomic<int>& global_sum) {
+    long long local_sum = 0;
+    for (int i = start; i <= end; ++i) {
+        local_sum += i;
+    }
+
+    global_sum.fetch_add(local_sum);
+}
+
+int thread_sum_parallel(int n) {
+    std::atomic<int> sum(0);
+    std::vector<std::thread> threads;
+    int num_threads = std::thread::hardware_concurrency();
+    
+    int grain_size = n / num_threads;
+
+    for (int i = 0; i < num_threads; i++) {
+        int start = i * grain_size + 1;
+        int end = (i == num_threads - 1) ? n : (i + 1) * grain_size;
+
+        threads.emplace_back(partial_sum, start, end, std::ref(sum));
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    return sum.load();
+}
+
 // Driver Function
 int Example_1()
 {
     const int n = 100000000;
 
     auto start_time = std::chrono::high_resolution_clock::now();
-
     int result_serial = sum_serial(n);
-
     auto end_time = std::chrono::high_resolution_clock::now();
-
     std::chrono::duration<double> serial_duration = end_time - start_time;
+    
+    start_time = std::chrono::high_resolution_clock::now();
+    int openMP_result_parallel = openMP_sum_parallel(n);
+    end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> openMP_parallel_duration = end_time - start_time;
 
     start_time = std::chrono::high_resolution_clock::now();
-
-    int result_parallel = sum_parallel(n);
+    int thread_result_parallel = thread_sum_parallel(n);
     end_time = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> parallel_duration
-        = end_time - start_time;
+    std::chrono::duration<double> thread_parallel_duration = end_time - start_time;
 
-    std::cout << "Serial result: " << result_serial
-              << std::endl;
-    std::cout << "Parallel result: " << result_parallel
-              << std::endl;
+    std::cout << "Serial result: " << result_serial << std::endl;
+    std::cout << "OpenMP parallel result: " << openMP_result_parallel << std::endl;
+    std::cout << "Thread parallel result: " << thread_result_parallel << std::endl;
+
     std::cout << "Serial duration: "
               << serial_duration.count() << " seconds"
               << std::endl;
-    std::cout << "Parallel duration: "
-              << parallel_duration.count() << " seconds"
+    std::cout << "OpenMP parallel duration: "
+              << openMP_parallel_duration.count() << " seconds"
               << std::endl;
-    std::cout << "Speedup: "
+    std::cout << "Thread parallel duration: "
+              << thread_parallel_duration.count() << " seconds"
+              << std::endl;
+              
+    std::cout << "OpenMP speedup: "
               << serial_duration.count()
-                     / parallel_duration.count()
+                     / openMP_parallel_duration.count()
+              << std::endl;
+    std::cout << "Thread speedup: "
+              << serial_duration.count()
+                     / thread_parallel_duration.count()
               << std::endl;
 
     return 0;
@@ -136,8 +179,8 @@ int run_FOR_examples()
     std::cout << "Example 1: Summation" << std::endl;
     Example_1();
 
-    std::cout << "\nExample 2: Pi Calculation" << std::endl;
-    Example_2();
+    // std::cout << "\nExample 2: Pi Calculation" << std::endl;
+    // Example_2();
 
     return 0;
 }
