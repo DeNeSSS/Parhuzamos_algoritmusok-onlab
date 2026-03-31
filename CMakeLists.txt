@@ -30,11 +30,11 @@ set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG")
 
 # Clang-tidy: Csak Debug és FastTest módban futtatjuk, hogy a mérést ne zavarja
-if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-    set(CMAKE_CXX_CLANG_TIDY "clang-tidy")
-else()
-    unset(CMAKE_CXX_CLANG_TIDY CACHE)
-endif()
+# if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+#     set(CMAKE_CXX_CLANG_TIDY "clang-tidy")
+# else()
+#     unset(CMAKE_CXX_CLANG_TIDY CACHE)
+# endif()
 
 # --- FORRÁSFÁJLOK ÉS CÉLOK ---
 

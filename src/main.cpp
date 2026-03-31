@@ -12,7 +12,8 @@ using namespace std;
 int main()
 {
     // minSearch::testMinSearchAlgorithms(1000000, 10);
-    sorting::testMinSearchAlgorithms(100000, 5);
+    sorting::testMinSearchAlgorithms(10000000, 1, 20);
+    // sorting::test();
 
     return 0;
 }

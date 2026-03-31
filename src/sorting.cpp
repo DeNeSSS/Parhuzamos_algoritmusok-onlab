@@ -223,7 +223,9 @@ namespace sorting
         void oddEvenMergeSort(vector<int> &values)
         {
             if (values.empty())
+            {
                 return;
+            }
 
             size_t originalSize = values.size();
             if (!isPowerOfTwo(originalSize))
@@ -242,42 +244,9 @@ namespace sorting
         }
 
         // ----- Paralell -----
-        const int THRESHOLD = 1000;
+        const int THRESHOLD = 10000;
 
-        void oddEvenMergeParallel(vector<int> &v, int start, int n, int step)
-        {
-            int m = step * 2;
-            if (m < n)
-            {
-                // Csak akkor hozunk létre taskokat, ha elég nagy az adathalmaz
-                if (n > THRESHOLD)
-                {
-#pragma omp task
-                    oddEvenMergeParallel(v, start, n, m);
-
-#pragma omp task
-                    oddEvenMergeParallel(v, start + step, n, m);
-
-#pragma omp taskwait // Megvárjuk mindkét ág végét a Compare-Exchange előtt
-                }
-                else
-                {
-                    oddEvenMergeParallel(v, start, n, m);
-                    oddEvenMergeParallel(v, start + step, n, m);
-                }
-
-                for (int i = start + step; i + step < start + n; i += m)
-                {
-                    compareExchange(v, i, i + step);
-                }
-            }
-            else
-            {
-                compareExchange(v, start, start + step);
-            }
-        }
-
-        void oddEvenMergeSortParallel(vector<int> &v, int start, int n)
+        void parallelOddEvenMergeSortRecursive(vector<int> &v, int start, int n)
         {
             if (n > 1)
             {
@@ -285,44 +254,45 @@ namespace sorting
 
                 if (n > THRESHOLD)
                 {
-#pragma omp task
-                    oddEvenMergeSortParallel(v, start, m);
-
-#pragma omp task
-                    oddEvenMergeSortParallel(v, start + m, m);
-
-#pragma omp taskwait // Barrier: a rendezésnek kész kell lennie az összefésülés előtt
+#pragma omp task shared(v) firstprivate(start, m)
+                    parallelOddEvenMergeSortRecursive(v, start, m);
+#pragma omp task shared(v) firstprivate(start, m)
+                    parallelOddEvenMergeSortRecursive(v, start + m, m);
+#pragma omp taskwait
                 }
                 else
                 {
-                    oddEvenMergeSortParallel(v, start, m);
-                    oddEvenMergeSortParallel(v, start + m, m);
+                    oddEvenMergeSortRecursive(v, start, m);
+                    oddEvenMergeSortRecursive(v, start + m, m);
                 }
 
-                oddEvenMergeParallel(v, start, n, 1);
+                // Uralkodj: összefésülés (szintén helyben, indexekkel)
+                oddEvenMergeRecursive(v, start, n, 1);
             }
         }
 
         void parallelOddEvenMergeSort(vector<int> &values)
         {
-            // 1. Padding (ha szükséges) - a korábbi kódod alapján
+            if (values.empty())
+            {
+                return;
+            }
+
             size_t originalSize = values.size();
             if (!isPowerOfTwo(originalSize))
             {
-                values.resize(nextPowerOfTwo(originalSize), INT_MAX);
+                size_t paddedSize = nextPowerOfTwo(originalSize);
+                values.resize(paddedSize, INT_MAX);
             }
 
-// 2. Párhuzamos régió indítása
 #pragma omp parallel
             {
-// A rekurzív task-indítást egyetlen szálnak kell elkezdenie!
 #pragma omp single
                 {
-                    oddEvenMergeSortParallel(values, 0, values.size());
+                    parallelOddEvenMergeSortRecursive(values, 0, values.size());
                 }
             }
 
-            // 3. Visszavágás
             if (values.size() > originalSize)
             {
                 values.resize(originalSize);
@@ -332,8 +302,11 @@ namespace sorting
 
     void test()
     {
-        vector<int> values{3, 9, 5, 2, 1, 10, 4, 8, 6, 7};
-        // auto res = oddEvenBubbleSort(values);
+        const int TEST_SIZE = 100;
+        srand(time(nullptr));
+        vector<int> values(TEST_SIZE);
+        generate(values.begin(), values.end(), []()
+                 { return rand() % TEST_SIZE; });
         oddEvenBubbleSort::paralellOddEvenBubbleSort(values);
         for (int val : values)
         {
@@ -345,14 +318,15 @@ namespace sorting
     void testMinSearchAlgorithms(int vector_size, int execution_count, int timeout_sec)
     {
         map<string, function<void(vector<int> &)>> functions = {
-            {"Serial odd-even bubble", oddEvenBubbleSort::oddEvenBubbleSort},
-            {"Parallel odd-even bubble", oddEvenBubbleSort::paralellOddEvenBubbleSort},
-            {"Serial odd-even merge", oddEvenMergeSort::oddEvenMergeSort},
+            // {"Serial odd-even bubble", oddEvenBubbleSort::oddEvenBubbleSort},
+            // {"Parallel odd-even bubble", oddEvenBubbleSort::paralellOddEvenBubbleSort},
+            // {"Serial odd-even merge", oddEvenMergeSort::oddEvenMergeSort},
             {"Parallel odd-even merge", oddEvenMergeSort::parallelOddEvenMergeSort}};
 
         srand(time(nullptr));
         vector<int> startValues(vector_size);
-        generate(startValues.begin(), startValues.end(), rand);
+        generate(startValues.begin(), startValues.end(), [vector_size]()
+                 { return rand() % vector_size; });
 
         cout << "\n"
              << setfill('=') << setw(100) << "" << endl;
@@ -369,14 +343,13 @@ namespace sorting
         {
             double total_time = 0, fastest = 1e9, slowest = 0;
             bool failed = false, timed_out = false;
+            vector<int> failed_sort;
 
             for (int i = 0; i < execution_count; ++i)
             {
-                // Minden iterációnál friss másolatot készítünk az eredeti adatokból
                 auto values = startValues;
                 auto start = chrono::high_resolution_clock::now();
 
-                // JAVÍTÁS 1: future<void>, mivel a függvény nem ad vissza semmit
                 future<void> fut = async(launch::async, func, ref(values));
 
                 if (fut.wait_for(chrono::seconds(timeout_sec)) == future_status::timeout)
@@ -385,17 +358,15 @@ namespace sorting
                     break;
                 }
 
-                // JAVÍTÁS 2: Nincs visszatérési érték, csak megvárjuk a végét
                 fut.get();
 
                 auto end = chrono::high_resolution_clock::now();
                 double duration = chrono::duration<double>(end - start).count();
 
-                // JAVÍTÁS 3: Ellenőrizzük, hogy a vektor tényleg rendezett-e
-                // std::is_sorted a leghatékonyabb módja a validálásnak
                 if (!std::is_sorted(values.begin(), values.end()))
                 {
                     failed = true;
+                    failed_sort = values;
                     break;
                 }
 
@@ -412,6 +383,16 @@ namespace sorting
             else if (failed)
             {
                 cout << "\033[31mFAILED (Not Sorted)\033[0m" << endl;
+                cout << "\n\n";
+                for (size_t i = 0; i < failed_sort.size() - 1; ++i)
+                {
+                    if (failed_sort[i] > failed_sort[i + 1])
+                    {
+                        cout << "Error at index " << i << ": " << failed_sort[i] << " > " << failed_sort[i + 1] << endl;
+                        break; // Csak az első hibát írjuk ki
+                    }
+                }
+                break;
             }
             else
             {
