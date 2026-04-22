@@ -6,14 +6,15 @@
 #include "sorting.h"
 #include "tester.h"
 #include "threadPool.h"
+#include "minSpanningTree.h"
 
 using namespace std;
 
 int main()
 {
     // minSearch::testMinSearchAlgorithms(1000000, 10);
-    sorting::testMinSearchAlgorithms(10000000, 1, 20);
+    // sorting::testMinSearchAlgorithms(1000000, 1, 20);
     // sorting::test();
-
+    minSpanningTree::test();
     return 0;
 }

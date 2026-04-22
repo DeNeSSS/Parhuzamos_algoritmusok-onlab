@@ -39,6 +39,7 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG")
 # --- FORRÁSFÁJLOK ÉS CÉLOK ---
 
 file(GLOB SOURCES "src/*.cpp")
+
 add_executable(parallel_lab ${SOURCES})
 
 target_include_directories(parallel_lab PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
