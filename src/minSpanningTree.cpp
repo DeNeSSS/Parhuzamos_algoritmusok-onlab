@@ -1,14 +1,16 @@
-#include <iostream>
-#include <vector>
-#include <queue>
 #include <algorithm>
 #include <climits>
+#include <iostream>
+#include <queue>
+#include <vector>
+#include <atomic>
+#include <mutex>
+#include <thread>
 
 namespace minSpanningTree
 {
     using namespace std;
 
-    // Közös Disjoint Set Union segédosztály
     class DSU
     {
         vector<int> parent, rank;
@@ -39,6 +41,89 @@ namespace minSpanningTree
                     parent[s2] = s1;
                     rank[s1]++;
                 }
+            }
+        }
+    };
+
+    // Közös Disjoint Set Union segédosztály
+    class ParallelDSU
+    {
+        vector<atomic<int>> parent;
+        vector<int> rank;
+        vector<mutex> locks;
+
+    public:
+        ParallelDSU(int n)
+        {
+            parent.resize(n);
+            rank.resize(n, 1);
+            for (int i = 0; i < n; i++)
+            {
+                parent[i].store(i, memory_order_relaxed);
+            }
+            locks.resize(n)
+        }
+
+        int find(int i)
+        {
+            int p = parent[i].load(memory_order_relaxed) return (parent[i] == i) ? i : (parent[i] = find(parent[i]));
+            if (p == i)
+            {
+                return i;
+            }
+
+            int root = find(p);
+            parent[i].store(root, std::memory_order_relaxed);
+            return root;
+        }
+
+        bool unite(int x, int y)
+        {
+
+            while (true)
+            {
+                int s1 = find(x);
+                int s2 = find(y);
+
+                if (s1 == s2)
+                    return false;
+
+                // Zároljuk a két GYÖKERET (nem x-et és y-t!)
+                // A scoped_lock garantálja, hogy nem lesz deadlock, akárhogy érkeznek a szálak
+                scoped_lock lock(locks[s1], locks[s2]);
+
+                // 2. Lépés: DUPLA ELLENŐRZÉS (Double-checked locking)
+                // Mivel a lockolás alatt egy másik szál már átírhatta s1 vagy s2 gyökerét,
+                // újra le kell ellenőriznünk, hogy Még MINDIG ezek-e a gyökerek!
+                int new_s1 = parent[s1].load(memory_order_relaxed);
+                int new_s2 = parent[s2].load(memory_order_relaxed);
+
+                // Ha bármelyik gyökér megváltozott a lockra várás közben,
+                // elengedjük a lockokat (a scoped_lock destruktora megteszi), és újrapróbáljuk
+                if (new_s1 != s1 || new_s2 != s2)
+                {
+                    continue; // Vissza a while(true) elejére
+                }
+
+                // --- INNENTŐL BIZTONSÁGBAN VAGYUNK ---
+                // Biztosan s1 és s2 az aktuális gyökerek, és csak mi férünk hozzájuk
+
+                if (rank[s1] < rank[s2])
+                {
+                    parent[s1].store(s2, memory_order_relaxed);
+                }
+                else if (rank[s1] > rank[s2])
+                {
+                    parent[s2].store(s1, memory_order_relaxed);
+                }
+                else
+                {
+                    parent[s2].store(s1, memory_order_relaxed);
+                    rank[s1]++; // Mivel a lock alatt vagyunk, ezt nyugodtan növelhetjük
+                }
+
+                // Sikeres egyesítés, kilépünk a ciklusból
+                return true
             }
         }
     };
@@ -198,6 +283,77 @@ namespace minSpanningTree
             }
             return totalWeight;
         }
+
+        int naivParallelBoruvkaMST()
+        {
+            ParallelDSU dsu(V);
+            int numTrees = V;
+            int totalWeight = 0;
+
+            while (numTrees > 1)
+            {
+                vector<vector<int>> cheapest(V, vector<int>(3, -1));
+
+                // Serarch for the cheapest edge in ervery sub tree
+#pragma omp parallel for
+                for (size_t i = 0; i < edges.size(); ++i) // size_t jobb az OMP-hez
+                {
+                    const auto &e = edges[i];
+                    int set1 = dsu.find(e[0]);
+                    int set2 = dsu.find(e[1]);
+
+                    if (set1 != set2)
+                    {
+// Csak egy szál léphet be egyszerre ebbe a blokkba a set1 miatt
+#pragma omp critical
+                        {
+                            if (cheapest[set1][2] == -1 || cheapest[set1][2] > e[2])
+                                cheapest[set1] = e;
+                            if (cheapest[set2][2] == -1 || cheapest[set2][2] > e[2])
+                                cheapest[set2] = e;
+                        }
+                    }
+                }
+
+                // Feltételezzük, hogy az 'added' a cikluson kívül van deklarálva
+                bool added = false;
+
+                // Külön változók a változások (delták) követésére
+                int weight_delta = 0;
+                int trees_merged = 0; // Azt számoljuk, hány fát kötöttünk össze
+
+// A reduction(|| : added) automatikusan megoldja a boolean flag problémát!
+#pragma omp parallel for reduction(+ : weight_delta, trees_merged) reduction(|| : added)
+                for (int i = 0; i < V; i++)
+                {
+                    if (cheapest[i][2] != -1)
+                    {
+                        // lock-free keresés
+                        int set1 = dsu.find(cheapest[i][0]);
+                        int set2 = dsu.find(cheapest[i][1]);
+
+                        if (set1 != set2)
+                        {
+                            // FIGYELEM: A unite-nak bool-lal kell visszatérnie!
+                            // Csak akkor vonjuk be a statisztikába, ha EZ a szál csinálta az egyesítést.
+                            if (dsu.unite(set1, set2))
+                            {
+                                weight_delta += cheapest[i][2];
+                                trees_merged++;
+                                added = true; // A reduction(||) miatt ez teljesen biztonságos
+                            }
+                        }
+                    }
+                }
+
+                // A ciklus után frissítjük a globális változókat
+                totalWeight += weight_delta;
+                numTrees -= trees_merged; // Kivonjuk az egyesített fák számát
+                if (!added)
+                    break; // Nem összefüggő gráf
+            }
+            return totalWeight;
+        }
     };
 
     int test()
@@ -216,4 +372,4 @@ namespace minSpanningTree
 
         return 0;
     }
-}
+} // namespace minSpanningTree
