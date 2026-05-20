@@ -4,6 +4,8 @@
 namespace minSpanningTree
 {
     int test();
+
+    void testMSTAlgorithms(int execution_count = 1, int timeout_sec = 10);
 }
 
 #endif

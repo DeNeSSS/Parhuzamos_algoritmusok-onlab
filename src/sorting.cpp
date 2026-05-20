@@ -415,9 +415,8 @@ namespace sorting
              { quickSort::quickSort(v); }},
             {"Parallel quickSort", [](vector<int> &v)
              { quickSort::parallelQuickSort(v); }},
-            // {"Serial odd-even merge", oddEvenMergeSort::oddEvenMergeSort},
-            // {"Parallel odd-even merge", oddEvenMergeSort::parallelOddEvenMergeSort}
-        };
+            {"Serial odd-even merge", oddEvenMergeSort::oddEvenMergeSort},
+            {"Parallel odd-even merge", oddEvenMergeSort::parallelOddEvenMergeSort}};
 
         srand(time(nullptr));
         vector<int> startValues(vector_size);

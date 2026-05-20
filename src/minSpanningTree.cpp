@@ -1,11 +1,20 @@
 #include <algorithm>
-#include <climits>
-#include <iostream>
-#include <queue>
-#include <vector>
+#include <array>
 #include <atomic>
+#include <chrono>
+#include <climits>
+#include <fstream>
+#include <functional>
+#include <future>
+#include <iomanip>
+#include <iostream>
+#include <map>
 #include <mutex>
+#include <omp.h>
+#include <queue>
 #include <thread>
+#include <tuple>
+#include <vector>
 
 namespace minSpanningTree
 {
@@ -48,32 +57,38 @@ namespace minSpanningTree
     // Közös Disjoint Set Union segédosztály
     class ParallelDSU
     {
-        vector<atomic<int>> parent;
+        unique_ptr<atomic<int>[]> parent;
         vector<int> rank;
-        vector<mutex> locks;
+        vector<unique_ptr<mutex>> locks;
 
     public:
         ParallelDSU(int n)
         {
-            parent.resize(n);
+            parent = make_unique<atomic<int>[]>(n);
             rank.resize(n, 1);
+            locks.reserve(n);
             for (int i = 0; i < n; i++)
             {
                 parent[i].store(i, memory_order_relaxed);
+                locks.emplace_back(make_unique<mutex>());
             }
-            locks.resize(n)
         }
 
         int find(int i)
         {
-            int p = parent[i].load(memory_order_relaxed) return (parent[i] == i) ? i : (parent[i] = find(parent[i]));
-            if (p == i)
+            int root = i;
+            while (parent[root].load(memory_order_relaxed) != root)
             {
-                return i;
+                root = parent[root].load(memory_order_relaxed);
             }
 
-            int root = find(p);
-            parent[i].store(root, std::memory_order_relaxed);
+            int curr = i;
+            while (parent[curr].load(memory_order_relaxed) != root)
+            {
+                int next = parent[curr].load(memory_order_relaxed);
+                parent[curr].store(root, memory_order_relaxed);
+                curr = next;
+            }
             return root;
         }
 
@@ -88,42 +103,26 @@ namespace minSpanningTree
                 if (s1 == s2)
                     return false;
 
-                // Zároljuk a két GYÖKERET (nem x-et és y-t!)
-                // A scoped_lock garantálja, hogy nem lesz deadlock, akárhogy érkeznek a szálak
-                scoped_lock lock(locks[s1], locks[s2]);
+                scoped_lock lock(*locks[s1], *locks[s2]);
 
-                // 2. Lépés: DUPLA ELLENŐRZÉS (Double-checked locking)
-                // Mivel a lockolás alatt egy másik szál már átírhatta s1 vagy s2 gyökerét,
-                // újra le kell ellenőriznünk, hogy Még MINDIG ezek-e a gyökerek!
                 int new_s1 = parent[s1].load(memory_order_relaxed);
                 int new_s2 = parent[s2].load(memory_order_relaxed);
-
-                // Ha bármelyik gyökér megváltozott a lockra várás közben,
-                // elengedjük a lockokat (a scoped_lock destruktora megteszi), és újrapróbáljuk
                 if (new_s1 != s1 || new_s2 != s2)
                 {
                     continue; // Vissza a while(true) elejére
                 }
 
-                // --- INNENTŐL BIZTONSÁGBAN VAGYUNK ---
-                // Biztosan s1 és s2 az aktuális gyökerek, és csak mi férünk hozzájuk
-
                 if (rank[s1] < rank[s2])
                 {
                     parent[s1].store(s2, memory_order_relaxed);
                 }
-                else if (rank[s1] > rank[s2])
-                {
-                    parent[s2].store(s1, memory_order_relaxed);
-                }
                 else
                 {
                     parent[s2].store(s1, memory_order_relaxed);
-                    rank[s1]++; // Mivel a lock alatt vagyunk, ezt nyugodtan növelhetjük
+                    if (rank[s1] == rank[s2])
+                        rank[s1]++;
                 }
-
-                // Sikeres egyesítés, kilépünk a ciklusból
-                return true
+                return true;
             }
         }
     };
@@ -143,20 +142,27 @@ namespace minSpanningTree
         Graph(int vertices) : V(vertices)
         {
             adj.resize(V);
-            matrix.resize(V, vector<int>(V, 0));
+            // Csak akkor foglaljunk mátrixot, ha kicsi a gráf!
+            if (V < 10000)
+            {
+                matrix.resize(V, vector<int>(V, 0));
+            }
         }
 
         void addEdge(int u, int v, int w)
         {
             edges.push_back({u, v, w});
             adj[u].push_back({v, w});
-            adj[v].push_back({u, w}); // Irányítatlan gráf
-            matrix[u][v] = w;
-            matrix[v][u] = w;
+            adj[v].push_back({u, w});
+            if (V < 10000)
+            {
+                matrix[u][v] = w;
+                matrix[v][u] = w;
+            }
         }
 
         // --- KRUSKAL ALGORITMUS ---
-        int kruskalMST()
+        long long kruskalMST()
         {
             // Prioritási sor az élek súly szerinti rendezéséhez
             auto cmp = [](const vector<int> &a, const vector<int> &b)
@@ -167,7 +173,8 @@ namespace minSpanningTree
                 pq.push(e);
 
             DSU dsu(V);
-            int cost = 0, edgeCount = 0;
+            long long cost = 0;
+            int edgeCount = 0;
 
             while (!pq.empty() && edgeCount < V - 1)
             {
@@ -184,12 +191,18 @@ namespace minSpanningTree
         }
 
         // --- KLASSZIKUS PRIM (Mátrixszal, O(V^2)) ---
-        int primMSTMatrix()
+        long long primMSTMatrix()
         {
+            if (V > 10000)
+            {
+                cout << "Túl nagy gráf - nem fut a prim";
+                return 0;
+            }
+
             vector<int> key(V, INT_MAX);
             vector<bool> mstSet(V, false);
             key[0] = 0;
-            int totalCost = 0;
+            long long totalCost = 0;
 
             for (int count = 0; count < V; count++)
             {
@@ -212,13 +225,13 @@ namespace minSpanningTree
         }
 
         // --- OPTIMÁLIS PRIM (Szomszédsági listával és kupaccal, O(E log V)) ---
-        int primMSTOptimal()
+        long long primMSTOptimal()
         {
             priority_queue<pair<int, int>, vector<pair<int, int>>, greater<pair<int, int>>> pq;
             vector<bool> visited(V, false);
-            int totalCost = 0;
+            long long totalCost = 0;
 
-            pq.push({0, 0}); // {súly, csúcs}
+            pq.push({0, 0});
             while (!pq.empty())
             {
                 auto [wt, u] = pq.top();
@@ -239,11 +252,11 @@ namespace minSpanningTree
         }
 
         // --- BORUVKA ALGORITMUS ---
-        int boruvkaMST()
+        long long boruvkaMST()
         {
             DSU dsu(V);
             int numTrees = V;
-            int totalWeight = 0;
+            long long totalWeight = 0;
 
             while (numTrees > 1)
             {
@@ -284,17 +297,16 @@ namespace minSpanningTree
             return totalWeight;
         }
 
-        int naivParallelBoruvkaMST()
+        long long naivParallelBoruvkaMST()
         {
             ParallelDSU dsu(V);
             int numTrees = V;
-            int totalWeight = 0;
+            long long totalWeight = 0;
 
             while (numTrees > 1)
             {
                 vector<vector<int>> cheapest(V, vector<int>(3, -1));
 
-                // Serarch for the cheapest edge in ervery sub tree
 #pragma omp parallel for
                 for (size_t i = 0; i < edges.size(); ++i) // size_t jobb az OMP-hez
                 {
@@ -304,7 +316,6 @@ namespace minSpanningTree
 
                     if (set1 != set2)
                     {
-// Csak egy szál léphet be egyszerre ebbe a blokkba a set1 miatt
 #pragma omp critical
                         {
                             if (cheapest[set1][2] == -1 || cheapest[set1][2] > e[2])
@@ -315,12 +326,9 @@ namespace minSpanningTree
                     }
                 }
 
-                // Feltételezzük, hogy az 'added' a cikluson kívül van deklarálva
                 bool added = false;
-
-                // Külön változók a változások (delták) követésére
                 int weight_delta = 0;
-                int trees_merged = 0; // Azt számoljuk, hány fát kötöttünk össze
+                int trees_merged = 0;
 
 // A reduction(|| : added) automatikusan megoldja a boolean flag problémát!
 #pragma omp parallel for reduction(+ : weight_delta, trees_merged) reduction(|| : added)
@@ -354,6 +362,143 @@ namespace minSpanningTree
             }
             return totalWeight;
         }
+
+        long long bufferedParallelBoruvkaMST()
+        {
+            ParallelDSU dsu(V);
+            long long totalWeight = 0;
+            int numTrees = V;
+            int num_threads = omp_get_max_threads();
+
+            while (numTrees > 1)
+            {
+                vector<vector<vector<int>>> local_cheapest(num_threads, vector<vector<int>>(V, {-1, -1, -1}));
+
+#pragma omp parallel
+                {
+                    int tid = omp_get_thread_num();
+#pragma omp for
+                    for (size_t i = 0; i < edges.size(); ++i)
+                    {
+                        int u = edges[i][0], v = edges[i][1], w = edges[i][2];
+                        int set1 = dsu.find(u), set2 = dsu.find(v);
+
+                        if (set1 != set2)
+                        {
+                            if (local_cheapest[tid][set1][2] == -1 || local_cheapest[tid][set1][2] > w)
+                                local_cheapest[tid][set1] = edges[i];
+                            if (local_cheapest[tid][set2][2] == -1 || local_cheapest[tid][set2][2] > w)
+                                local_cheapest[tid][set2] = edges[i];
+                        }
+                    }
+                }
+
+                vector<vector<int>> global_cheapest(V, {-1, -1, -1});
+#pragma omp parallel for
+                for (int i = 0; i < V; ++i)
+                {
+                    for (int t = 0; t < num_threads; ++t)
+                    {
+                        if (local_cheapest[t][i][2] != -1)
+                        {
+                            if (global_cheapest[i][2] == -1 || global_cheapest[i][2] > local_cheapest[t][i][2])
+                                global_cheapest[i] = local_cheapest[t][i];
+                        }
+                    }
+                }
+
+                bool added = false;
+                long long weight_delta = 0;
+                int trees_merged = 0;
+#pragma omp parallel for reduction(+ : weight_delta, trees_merged) reduction(|| : added)
+                for (int i = 0; i < V; i++)
+                {
+                    if (global_cheapest[i][2] != -1)
+                    {
+                        if (dsu.unite(global_cheapest[i][0], global_cheapest[i][1]))
+                        {
+                            weight_delta += global_cheapest[i][2];
+                            trees_merged++;
+                            added = true;
+                        }
+                    }
+                }
+
+                totalWeight += weight_delta;
+                numTrees -= trees_merged;
+                if (!added)
+                    break;
+            }
+            return totalWeight;
+        }
+
+        long long casParallelBoruvkaMST()
+        {
+            ParallelDSU dsu(V);
+            long long totalWeight = 0;
+            int numTrees = V;
+
+            while (numTrees > 1)
+            {
+                // Atomi élek: felső 32 bit a súly, alsó 32 bit az él indexe
+                // LLONG_MAX-szal inicializálunk (ez jelenti a -1-et)
+                vector<atomic<long long>> cheapest(V);
+                for (int i = 0; i < V; ++i)
+                    cheapest[i].store(LLONG_MAX);
+
+#pragma omp parallel for
+                for (size_t i = 0; i < edges.size(); ++i)
+                {
+                    int u = edges[i][0], v = edges[i][1], w = edges[i][2];
+                    int set1 = dsu.find(u), set2 = dsu.find(v);
+
+                    if (set1 != set2)
+                    {
+                        long long new_val = ((long long)w << 32) | (i & 0xFFFFFFFFLL);
+
+                        // Atomi "update if smaller" logika (CAS) mindkét komponensre
+                        for (int set : {set1, set2})
+                        {
+                            long long current = cheapest[set].load(memory_order_relaxed);
+                            while (true)
+                            {
+                                if (current != LLONG_MAX && (current >> 32) <= w)
+                                    break;
+                                if (cheapest[set].compare_exchange_weak(current, new_val))
+                                    break;
+                            }
+                        }
+                    }
+                }
+
+                bool added = false;
+                long long weight_delta = 0;
+                int trees_merged = 0;
+
+#pragma omp parallel for reduction(+ : weight_delta, trees_merged) reduction(|| : added)
+                for (int i = 0; i < V; i++)
+                {
+                    long long val = cheapest[i].load();
+                    if (val != LLONG_MAX)
+                    {
+                        int edge_idx = (int)(val & 0xFFFFFFFFLL);
+                        const auto &e = edges[edge_idx];
+                        if (dsu.unite(e[0], e[1]))
+                        {
+                            weight_delta += e[2];
+                            trees_merged++;
+                            added = true;
+                        }
+                    }
+                }
+
+                totalWeight += weight_delta;
+                numTrees -= trees_merged;
+                if (!added)
+                    break;
+            }
+            return totalWeight;
+        }
     };
 
     int test()
@@ -369,7 +514,150 @@ namespace minSpanningTree
         std::cout << "Prim Matrix cost: " << g.primMSTMatrix() << std::endl;
         std::cout << "Prim Optimal cost: " << g.primMSTOptimal() << std::endl;
         std::cout << "Boruvka cost: " << g.boruvkaMST() << std::endl;
+        std::cout << "Parallel Boruvka cost: " << g.naivParallelBoruvkaMST() << std::endl;
 
         return 0;
+    }
+
+    pair<int, vector<array<int, 3>>> read_MST_test(const string &file_name)
+    {
+        ifstream file("../test_input/spanning_tree_test/" + file_name);
+        if (!file.is_open())
+        {
+            cerr << "Error: Could not open file " << file_name << endl;
+            return {0, {}};
+        }
+
+        vector<array<int, 3>> result;
+        int n = 0, m = 0;
+
+        if (!(file >> n >> m))
+            return {0, {}};
+
+        int u, v, w;
+        int real_max_v = 0;
+        while (file >> u >> v >> w)
+        {
+            int u_zero = u - 1;
+            int v_zero = v - 1;
+
+            result.push_back({u_zero, v_zero, w});
+            if (u_zero > real_max_v)
+                real_max_v = u_zero;
+            if (v_zero > real_max_v)
+                real_max_v = v_zero;
+        }
+
+        n = max(n, real_max_v + 1);
+
+        file.close();
+        return {n, result};
+    }
+
+    void testMSTAlgorithms(int execution_count, int timeout_sec)
+    {
+        // 1. Gráf beolvasása és felépítése
+        auto graph_info = read_MST_test("custom_test.in");
+        int V = graph_info.first;
+        const auto &edges_data = graph_info.second;
+
+        // Létrehozunk egy alap gráfot, amit referenciaként használunk
+        minSpanningTree::Graph g(V);
+        for (const auto &edge : edges_data)
+        {
+            g.addEdge(edge[0], edge[1], edge[2]);
+        }
+
+        // 2. Függvények regisztrálása (lambda-k segítségével, hogy a 'g' példányon fussanak)
+        // Mivel az MST függvények int-et adnak vissza, a map-et is ehhez igazítjuk
+        map<string, function<long long()>> functions = {
+            {"Kruskal", [&]()
+             { return g.kruskalMST(); }},
+            {"Prim (matrix)", [&]()
+             { return g.primMSTMatrix(); }},
+            {"Prim (list)", [&]()
+             { return g.primMSTOptimal(); }},
+            {"Boruvka", [&]()
+             { return g.boruvkaMST(); }},
+            {"Naiv parallel Boruvka", [&]()
+             { return g.naivParallelBoruvkaMST(); }},
+            {"Buffered parallel Boruvka", [&]()
+             { return g.bufferedParallelBoruvkaMST(); }},
+            {"CAS parallel Boruvka", [&]()
+             { return g.casParallelBoruvkaMST(); }},
+        };
+
+        cout << "\n"
+             << setfill('=') << setw(100) << "" << endl;
+        cout << " MST ALGORITHM BENCHMARK | Vertices: " << V << " | Iterations: " << execution_count << endl;
+        cout << setfill('=') << setw(100) << "" << setfill(' ') << endl;
+        cout << left << setw(25) << "Algorithm"
+             << setw(15) << "Result (Cost)"
+             << setw(15) << "Avg Time (s)"
+             << setw(15) << "Fastest (s)"
+             << "Status" << endl;
+        cout << string(100, '-') << endl;
+
+        // Tároljuk az első sikeres futás eredményét, hogy ellenőrizzük a többiek helyességét
+        long long reference_cost = -1;
+
+        for (auto const &[name, func] : functions)
+        {
+            double total_time = 0, fastest = 1e9, slowest = 0;
+            bool failed = false, timed_out = false;
+            int current_result = 0;
+
+            for (int i = 0; i < execution_count; ++i)
+            {
+                auto start = chrono::high_resolution_clock::now();
+
+                // Async hívás a timeout kezeléséhez
+                future<long long> fut = async(launch::async, func);
+
+                if (fut.wait_for(chrono::seconds(timeout_sec)) == future_status::timeout)
+                {
+                    timed_out = true;
+                    break;
+                }
+
+                current_result = fut.get();
+
+                auto end = chrono::high_resolution_clock::now();
+                double duration = chrono::duration<double>(end - start).count();
+
+                // Eredmény validálása: minden algoritmusnak ugyanazt a költséget kell visszaadnia
+                if (reference_cost == -1)
+                    reference_cost = current_result;
+                if (current_result != reference_cost)
+                {
+                    failed = true;
+                    break;
+                }
+
+                total_time += duration;
+                fastest = min(fastest, duration);
+                slowest = max(slowest, duration);
+            }
+
+            cout << left << setw(25) << name;
+
+            if (timed_out)
+            {
+                cout << setw(15) << "-" << "\033[33mTIMEOUT\033[0m" << endl;
+            }
+            else if (failed)
+            {
+                cout << setw(15) << current_result << "\033[31mFAILED (Wrong Cost)\033[0m" << endl;
+            }
+            else
+            {
+                cout << setw(15) << current_result
+                     << fixed << setprecision(6)
+                     << setw(15) << (total_time / execution_count)
+                     << setw(15) << fastest
+                     << "\033[32mSUCCESS\033[0m" << endl;
+            }
+        }
+        cout << setfill('=') << setw(100) << "" << setfill(' ') << endl;
     }
 } // namespace minSpanningTree
