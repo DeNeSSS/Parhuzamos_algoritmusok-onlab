@@ -19,18 +19,14 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug)
 endif()
 
-# 1. DEBUG: Nincs optimalizálás, sok infó a hibakereséshez
+# 1. DEBUG: Nincs optimalizálás, sok infó a hibakereséshez (-O0)
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -Wall -Wextra")
 
-# 2. FAST_TEST (Gyors tesztelés): Közepes optimalizálás, gyors fordítás
-# Itt a RelWithDebInfo-t használjuk alapnak
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g")
+# 2. MEASURE / RELEASE: Tisztességes optimalizálás a mérésekhez (-O2)
+set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 
-# 3. MEASURE (A méréshez): Maximális sebesség, hardver-specifikus optimalizálás
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG")
-
-# Clang-tidy: Csak Debug és FastTest módban futtatjuk, hogy a mérést ne zavarja
-# if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+# Clang-tidy: Csak Debug módban futtatjuk, hogy a mérést ne zavarja
+# if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 #     set(CMAKE_CXX_CLANG_TIDY "clang-tidy")
 # else()
 #     unset(CMAKE_CXX_CLANG_TIDY CACHE)

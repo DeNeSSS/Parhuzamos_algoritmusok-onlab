@@ -79,8 +79,8 @@ def create_plot(csv_files, output_filename, is_zoomed=False, top_x=None, names=N
         ax2.set_ylim(0, zoom_cpu_limit)
 
 
-    # plt.xscale('log')
     # --- Bal oldali ábra (Wall Time) formázása ---
+    ax1.set_xscale('log')
     ax1.set_title("Futásidő", fontsize=14)
     ax1.set_xlabel("Vektor mérete (Millió elem)", fontsize=12)
     ax1.set_ylabel("Átlagos idő (másodperc)", fontsize=12)
@@ -90,6 +90,7 @@ def create_plot(csv_files, output_filename, is_zoomed=False, top_x=None, names=N
     ax1.legend(loc="upper left", fontsize=10)
 
     # --- Jobb oldali ábra (CPU Work) formázása ---
+    ax2.set_xscale('log')
     ax2.set_title("Összesített processzor munka", fontsize=14)
     ax2.set_xlabel("Vektor mérete (Millió elem)", fontsize=12)
     ax2.set_ylabel("CPU idő (másodperc)", fontsize=12)
@@ -97,7 +98,7 @@ def create_plot(csv_files, output_filename, is_zoomed=False, top_x=None, names=N
     ax2.legend(loc="upper left", fontsize=10)
 
     if plot_name == None:
-        plt.suptitle(f"Minimumkereső Algoritmusok Teljesítménye", fontsize=18, fontweight='bold')
+        plt.suptitle(f"Rendező Algoritmusok Teljesítménye", fontsize=18, fontweight='bold')
     else:
         plt.suptitle(plot_name, fontsize=18, fontweight='bold')
     plt.tight_layout()
@@ -112,39 +113,39 @@ def create_plot(csv_files, output_filename, is_zoomed=False, top_x=None, names=N
 
 
 def main():
-    dir_name = "change"
-    data_dir = f"test_data/min_search/{dir_name}/"
+    dir_name = "mergeSort"
+    data_dir = f"test_data/sorting/{dir_name}/"
     csv_files = glob.glob(os.path.join(data_dir, "*_results.csv"))
     
     if not csv_files:
         print(f"Hiba: Nem találtam CSV fájlokat a '{data_dir}' mappában.")
         return
 
-    # 1. Teljes grafikon legenerálása (mindenki látszik)
-    full_output = os.path.join(data_dir, f"benchmark_plot_{dir_name}.png")
-    create_plot(csv_files, full_output)
+    # # 1. Teljes grafikon legenerálása (mindenki látszik)
+    # full_output = os.path.join(data_dir, f"benchmark_plot_{dir_name}.png")
+    # create_plot(csv_files, full_output, show=True)
 
-    # 2. Zoomolt grafikon legenerálása (csak a gyorsak versenye látszik)
-    zoomed_output = os.path.join(data_dir, f"benchmark_plot_zoomed_{dir_name}.png")
-    create_plot(csv_files, zoomed_output, is_zoomed=True, show=True)
+    # # 2. Zoomolt grafikon legenerálása (csak a gyorsak versenye látszik)
+    # zoomed_output = os.path.join(data_dir, f"benchmark_plot_zoomed_{dir_name}.png")
+    # create_plot(csv_files, zoomed_output, is_zoomed=True, show=True)
 
     # 3.
-    best5_output = os.path.join(data_dir, f"benchmark_plot_best5_{dir_name}.png")
-    create_plot(csv_files, best5_output, top_x=5, plot_name="5 leghatékonyabb algoritmus")
+    merge3 = os.path.join(data_dir, f"benchmark_plot_best5_{dir_name}.png")
+    create_plot(csv_files, merge3, top_x=5, names=["Parallel Merge Sort", "Parallel Merge Sort 2 - 100", "Parallel Merge Sort 3"], show=True)
 
     # 4. 
-    szeleteles_output = os.path.join(data_dir, f"benchmark_plot_reduction_{dir_name}.png")
-    create_plot(csv_files, szeleteles_output, 
-                names=["Serial", "OMP Reduction", "OMP SIMD", "STD Parallel  C++17 ", "ThreadPool Reduction"], 
-                plot_name="Szeletelő algoritmusok",
-                show=True)
+    # bubble_output = os.path.join(data_dir, f"benchmark_plot_reduction_{dir_name}.png")
+    # create_plot(csv_files, bubble_output, 
+    #             names=["Serial Odd-Even Bubble", "Parallel Odd-Even Bubble"], 
+    #             plot_name="bubble sort algoritmusok",
+    #             show=True)
 
-    # 5.
-    tomorites_output = os.path.join(data_dir, f"benchmark_plot_compression_{dir_name}.png")
-    create_plot(csv_files, tomorites_output,
-                names=["Serial", "OMP Compression", "Strided Compression", "Recursive Async"],
-                plot_name="Tömörítő algoritmusok",
-                )
+    # # 5.
+    # tomorites_output = os.path.join(data_dir, f"benchmark_plot_compression_{dir_name}.png")
+    # create_plot(csv_files, tomorites_output,
+    #             names=["Serial", "OMP Compression", "Strided Compression", "Recursive Async"],
+    #             plot_name="Tömörítő algoritmusok",
+    #             )
 
     
 

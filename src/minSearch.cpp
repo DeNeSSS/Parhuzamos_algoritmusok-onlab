@@ -1,6 +1,5 @@
 #include "minSearch.h"
 #include "threadPool.h"
-#include "tester.h"
 #include <thread>
 #include <omp.h>
 #include <iostream>
