@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <array>
+#include <filesystem>
+#include <set>
 #include <atomic>
 #include <chrono>
 #include <climits>
@@ -15,6 +17,8 @@
 #include <thread>
 #include <tuple>
 #include <vector>
+
+#include "minSpanningTree.h"
 
 namespace minSpanningTree
 {
@@ -76,20 +80,16 @@ namespace minSpanningTree
 
         int find(int i)
         {
-            int root = i;
-            while (parent[root].load(memory_order_relaxed) != root)
-            {
-                root = parent[root].load(memory_order_relaxed);
-            }
-
             int curr = i;
-            while (parent[curr].load(memory_order_relaxed) != root)
+            while (true)
             {
-                int next = parent[curr].load(memory_order_relaxed);
-                parent[curr].store(root, memory_order_relaxed);
-                curr = next;
+                int p = parent[curr].load(memory_order_relaxed);
+                if (p == curr)
+                    return curr;
+                int gp = parent[p].load(memory_order_relaxed);
+                parent[curr].store(gp, memory_order_relaxed);
+                curr = p;
             }
-            return root;
         }
 
         bool unite(int x, int y)
@@ -137,6 +137,8 @@ namespace minSpanningTree
         vector<vector<pair<int, int>>> adj;
         // 3. Szomszédsági mátrix - Klasszikus Prim számára
         vector<vector<int>> matrix;
+
+        const int TRY_TREASHOLD = 100;
 
     public:
         Graph(int vertices) : V(vertices)
@@ -193,7 +195,7 @@ namespace minSpanningTree
         // --- KLASSZIKUS PRIM (Mátrixszal, O(V^2)) ---
         long long primMSTMatrix()
         {
-            if (V > 10000)
+            if (V >= 10000)
             {
                 cout << "Túl nagy gráf - nem fut a prim";
                 return 0;
@@ -251,6 +253,470 @@ namespace minSpanningTree
             return totalCost;
         }
 
+        // --- SETIA ET AL. PARALLEL PRIM ALGORITMUS ---
+        long long parallelPrimSetiaMST()
+        {
+            int num_threads = omp_get_max_threads();
+
+            // Szálak állapotát leíró struktúra
+            struct ThreadData
+            {
+                mutex mtx;
+                bool aborted = false;
+                long long mst_weight = 0;
+                priority_queue<pair<int, pair<int, int>>,
+                               vector<pair<int, pair<int, int>>>,
+                               greater<>>
+                    pq;
+            };
+
+            vector<unique_ptr<ThreadData>> threads(num_threads);
+            for (int i = 0; i < num_threads; ++i)
+                threads[i] = make_unique<ThreadData>();
+
+            struct NodeData
+            {
+                mutex mtx;
+                int color = -1;
+            };
+            vector<unique_ptr<NodeData>> nodes(V);
+            for (int i = 0; i < V; ++i)
+                nodes[i] = make_unique<NodeData>();
+
+            ParallelDSU dsu(V);
+            atomic<int> uncolored_count(V);
+
+            auto merge_pqs = [](auto &dest, auto &src)
+            {
+                while (!src.empty())
+                {
+                    dest.push(src.top());
+                    src.pop();
+                }
+            };
+
+#pragma omp parallel
+            {
+                int tid = omp_get_thread_num();
+                auto &my_thread = *threads[tid];
+
+                while (uncolored_count.load(memory_order_relaxed) > 0)
+                {
+                    int root = -1;
+
+                    // 1. Heurisztika: Véletlenszerű uncolored gyökér keresése (Wrap-around find-Min helyettesítője)
+                    for (int attempt = 0; attempt < 50; ++attempt)
+                    {
+                        int r = rand() % V;
+                        int r_set = dsu.find(r);
+                        if (nodes[r_set]->color == -1)
+                        {
+                            root = r;
+                            break;
+                        }
+                    }
+                    // Ha a véletlen nem talált, szekvenciális keresés
+                    if (root == -1)
+                    {
+                        for (int i = 0; i < V; ++i)
+                        {
+                            int r_set = dsu.find(i);
+                            if (nodes[r_set]->color == -1)
+                            {
+                                root = i;
+                                break;
+                            }
+                        }
+                    }
+                    if (root == -1)
+                    {
+                        break; // Minden csúcs ki van színezve
+                    }
+
+                    // 2. Gyökér lefoglalása és színezése
+                    int root_set = dsu.find(root);
+                    bool root_acquired = false;
+                    {
+                        lock_guard<mutex> lk(nodes[root_set]->mtx);
+                        if (nodes[root_set]->color == -1)
+                        {
+                            nodes[root_set]->color = tid;
+                            uncolored_count--;
+                            root_acquired = true;
+                        }
+                    }
+
+                    if (!root_acquired)
+                    {
+                        continue;
+                    }
+
+                    // 3. Szál inicializálása (új MST építésének kezdete)
+                    {
+                        lock_guard<mutex> lk(my_thread.mtx);
+                        my_thread.aborted = false;
+                        my_thread.mst_weight = 0;
+                        while (!my_thread.pq.empty())
+                            my_thread.pq.pop();
+
+                        // Szomszédok bedobása a prioritási sorba
+                        for (auto &edge : adj[root])
+                        {
+                            my_thread.pq.push({edge.second, {root, edge.first}});
+                        }
+                    }
+
+                    // 4. Belső Prim iteráció (MinNode keresés és fa növelés)
+                    while (true)
+                    {
+                        pair<int, pair<int, int>> min_edge;
+                        {
+                            lock_guard<mutex> lk(my_thread.mtx);
+                            if (my_thread.aborted)
+                                break; // Valaki beolvasztott minket
+                            if (my_thread.pq.empty())
+                                break; // Kész a fa
+                            min_edge = my_thread.pq.top();
+                            my_thread.pq.pop();
+                        }
+
+                        int w = min_edge.first;
+                        int u = min_edge.second.first;
+                        int v = min_edge.second.second;
+
+                        int setidx = dsu.find(v);
+                        int c = -2;
+
+                        // Megnézzük a talált csúcs aktuális színét
+                        {
+                            lock_guard<mutex> lk(nodes[setidx]->mtx);
+                            c = nodes[setidx]->color;
+                            if (c == -1)
+                            {
+                                nodes[setidx]->color = tid;
+                                uncolored_count--;
+                            }
+                        }
+
+                        if (c == -1)
+                        {
+                            // A) Sima Prim: uncolored csúcs hozzáadása
+                            {
+                                lock_guard<mutex> lk(my_thread.mtx);
+                                my_thread.mst_weight += w;
+                                for (auto &edge : adj[v])
+                                {
+                                    my_thread.pq.push({edge.second, {v, edge.first}});
+                                }
+                            }
+                            dsu.unite(dsu.find(u), setidx);
+
+                            // Új root biztosítása a saját színünkkel
+                            int new_root = dsu.find(setidx);
+                            if (new_root != setidx)
+                            {
+                                lock_guard<mutex> lk(nodes[new_root]->mtx);
+                                nodes[new_root]->color = tid;
+                            }
+                        }
+                        else if (c != tid)
+                        {
+                            // B) ÜTKÖZÉS EGY MÁSIK SZÁLLAL! -> MergeTree művelet
+                            int j = c;
+                            int m1 = min(tid, j);
+                            int m2 = max(tid, j);
+
+                            int root_u = dsu.find(u);
+                            int root_v = setidx;
+
+                            if (root_u == root_v)
+                                continue; // Belső éllé vált
+
+                            int rm1 = min(root_u, root_v);
+                            int rm2 = max(root_u, root_v);
+
+                            bool pushed_back = false;
+
+                            // DEADLOCK VÉDELEM
+                            {
+                                scoped_lock lk(threads[m1]->mtx, threads[m2]->mtx, nodes[rm1]->mtx, nodes[rm2]->mtx);
+
+                                // JAVÍTÁS 1: Ellenőrizzük, hogy a gyökerek nem változtak-e a lockolás közben!
+                                if (dsu.find(u) != root_u || dsu.find(v) != root_v)
+                                {
+                                    pushed_back = true;
+                                }
+                                else if (nodes[root_v]->color == j && !my_thread.aborted && !threads[j]->aborted)
+                                {
+                                    if (tid < j)
+                                    {
+                                        // 1. Eset: Mi nyerünk, 'j' a vesztes
+                                        my_thread.mst_weight += w + threads[j]->mst_weight;
+                                        // my_thread.small_tree_count = 0; // (Ha a heurisztikus verziót használod, ezt tedd be!)
+                                        merge_pqs(my_thread.pq, threads[j]->pq);
+                                        threads[j]->aborted = true;
+
+                                        // A vesztes gyökerét a nyertes színére festjük!
+                                        nodes[root_v]->color = tid;
+                                        nodes[root_u]->color = tid;
+                                        dsu.unite(root_u, root_v);
+                                    }
+                                    else
+                                    {
+                                        // 2. Eset: 'j' a nyertes, mi vagyunk a vesztes
+                                        threads[j]->mst_weight += w + my_thread.mst_weight;
+                                        // my_thread.small_tree_count++; // (Ha a heurisztikus verziót használod, ezt tedd be!)
+                                        merge_pqs(threads[j]->pq, my_thread.pq);
+                                        my_thread.aborted = true;
+
+                                        // A vesztes gyökerét a nyertes színére festjük!
+                                        nodes[root_u]->color = j;
+                                        nodes[root_v]->color = j;
+                                        dsu.unite(root_u, root_v);
+                                    }
+                                }
+                                else
+                                {
+                                    // Ha a szál meghalt közben, újra kell próbálni ezt az élt!
+                                    pushed_back = true;
+                                }
+                            } // Scoped lock vége
+
+                            // JAVÍTÁS 2: Ha a feltételek nem stimmeltek, az élt visszatesszük a sorba!
+                            if (pushed_back)
+                            {
+                                lock_guard<mutex> lk(my_thread.mtx);
+                                my_thread.pq.push({w, {u, v}});
+                            }
+                            if (my_thread.aborted)
+                                break; // Kilépés, új rootot keresünk
+                        }
+                    }
+                }
+            }
+
+            long long final_weight = 0;
+            for (int i = 0; i < num_threads; ++i)
+            {
+                if (!threads[i]->aborted && threads[i]->mst_weight > 0)
+                {
+                    final_weight = threads[i]->mst_weight;
+                    break;
+                }
+            }
+            return final_weight;
+        }
+
+        // --- SETIA ET AL. PARALLEL PRIM ALGORITMUS heurisztikával kiegészítve ---
+        long long parallelPrimSetiaWithHeuristicMST()
+        {
+            int num_threads = omp_get_max_threads();
+
+            // Szálak állapotát leíró struktúra
+            struct ThreadData
+            {
+                mutex mtx;
+                bool aborted = false;
+                long long mst_weight = 0;
+                priority_queue<pair<int, pair<int, int>>,
+                               vector<pair<int, pair<int, int>>>, greater<>>
+                    pq;
+                int small_tree_count = 0;
+                int root_search_count = 0;
+            };
+
+            vector<unique_ptr<ThreadData>> threads(num_threads);
+            for (int i = 0; i < num_threads; ++i)
+                threads[i] = make_unique<ThreadData>();
+
+            struct NodeData
+            {
+                mutex mtx;
+                int color = -1;
+            };
+            vector<unique_ptr<NodeData>> nodes(V);
+            for (int i = 0; i < V; ++i)
+                nodes[i] = make_unique<NodeData>();
+
+            ParallelDSU dsu(V);
+
+            auto merge_pqs = [](auto &dest, auto &src)
+            {
+                while (!src.empty())
+                {
+                    dest.push(src.top());
+                    src.pop();
+                }
+            };
+
+#pragma omp parallel
+            {
+                int tid = omp_get_thread_num();
+                auto &my_thread = *threads[tid];
+
+                while (my_thread.small_tree_count < this->TRY_TREASHOLD &&
+                       my_thread.root_search_count < this->TRY_TREASHOLD)
+                {
+                    int root = -1;
+                    int r = rand() % V;
+                    int r_set = dsu.find(r);
+                    if (nodes[r_set]->color == -1)
+                    {
+                        root = r;
+                        my_thread.root_search_count = 0;
+                    }
+                    else
+                    {
+                        my_thread.root_search_count++;
+                        continue;
+                    }
+
+                    // 2. Gyökér lefoglalása és színezése
+                    int root_set = dsu.find(root);
+                    bool root_acquired = false;
+                    {
+                        lock_guard<mutex> lk(nodes[root_set]->mtx);
+                        if (nodes[root_set]->color == -1)
+                        {
+                            nodes[root_set]->color = tid;
+                            root_acquired = true;
+                        }
+                    }
+
+                    if (!root_acquired)
+                    {
+                        continue;
+                    }
+
+                    // 3. Szál inicializálása (új MST építésének kezdete)
+                    {
+                        lock_guard<mutex> lk(my_thread.mtx);
+                        my_thread.aborted = false;
+                        my_thread.mst_weight = 0;
+                        while (!my_thread.pq.empty())
+                            my_thread.pq.pop();
+
+                        // Szomszédok bedobása a prioritási sorba
+                        for (auto &edge : adj[root])
+                        {
+                            my_thread.pq.push({edge.second, {root, edge.first}});
+                        }
+                    }
+
+                    // 4. Belső Prim iteráció (MinNode keresés és fa növelés)
+                    while (true)
+                    {
+                        pair<int, pair<int, int>> min_edge;
+                        {
+                            lock_guard<mutex> lk(my_thread.mtx);
+                            if (my_thread.aborted)
+                                break; // Valaki beolvasztott minket
+                            if (my_thread.pq.empty())
+                                break; // Kész a fa
+                            min_edge = my_thread.pq.top();
+                            my_thread.pq.pop();
+                        }
+
+                        int w = min_edge.first;
+                        int u = min_edge.second.first;
+                        int v = min_edge.second.second;
+
+                        int setidx = dsu.find(v);
+                        int c = -2;
+
+                        // Megnézzük a talált csúcs aktuális színét
+                        {
+                            lock_guard<mutex> lk(nodes[setidx]->mtx);
+                            c = nodes[setidx]->color;
+                            if (c == -1)
+                            {
+                                nodes[setidx]->color = tid;
+                            }
+                        }
+
+                        if (c == -1)
+                        {
+                            // A) Sima Prim: uncolored csúcs hozzáadása
+                            {
+                                lock_guard<mutex> lk(my_thread.mtx);
+                                my_thread.mst_weight += w;
+                                for (auto &edge : adj[v])
+                                {
+                                    my_thread.pq.push({edge.second, {v, edge.first}});
+                                }
+                            }
+                            dsu.unite(dsu.find(u), setidx);
+
+                            // Új root biztosítása a saját színünkkel
+                            int new_root = dsu.find(setidx);
+                            if (new_root != setidx)
+                            {
+                                lock_guard<mutex> lk(nodes[new_root]->mtx);
+                                nodes[new_root]->color = tid;
+                            }
+                        }
+                        else if (c != tid)
+                        {
+                            // B) ÜTKÖZÉS EGY MÁSIK SZÁLLAL! -> MergeTree művelet
+                            int j = c;
+                            int m1 = min(tid, j);
+                            int m2 = max(tid, j);
+
+                            // DEADLOCK VÉDELEM: Mindhárom lockot egyszerre, rendezetten kérjük el (C++17)
+                            scoped_lock lk(threads[m1]->mtx, threads[m2]->mtx, nodes[setidx]->mtx);
+
+                            // Ellenőrizzük, hogy a feltételek nem változtak-e a lockolás közben
+                            if (nodes[setidx]->color == j && !my_thread.aborted && !threads[j]->aborted)
+                            {
+                                if (tid < j)
+                                {
+                                    // 1. Eset: A mi ID-nk a kisebb -> 'j'-t beolvasztjuk magunkba
+                                    my_thread.mst_weight += w + threads[j]->mst_weight;
+                                    my_thread.small_tree_count = 0;
+                                    merge_pqs(my_thread.pq, threads[j]->pq);
+                                    threads[j]->aborted = true; // 'j' szál "újraindítása"
+                                    nodes[setidx]->color = tid;
+                                    dsu.unite(dsu.find(u), setidx);
+
+                                    int new_root = dsu.find(setidx);
+                                    if (new_root != setidx)
+                                        nodes[new_root]->color = tid;
+                                }
+                                else
+                                {
+                                    // 2. Eset: 'j' ID-ja a kisebb -> Minket olvasztanak be 'j'-be
+                                    threads[j]->mst_weight += w + my_thread.mst_weight;
+                                    my_thread.small_tree_count++;
+                                    merge_pqs(threads[j]->pq, my_thread.pq);
+                                    my_thread.aborted = true; // Saját magunk "újraindítása"
+                                    nodes[setidx]->color = j;
+                                    dsu.unite(dsu.find(u), setidx);
+
+                                    int new_root = dsu.find(setidx);
+                                    if (new_root != setidx)
+                                        nodes[new_root]->color = j;
+
+                                    break; // Kilépés a while ciklusból, külső ciklusban új rootot keresünk
+                                }
+                            }
+                        }
+                        // C) Ha c == tid, a csúcs már a mi fánk része, simán átugorjuk (belső él).
+                    }
+                }
+            }
+
+            long long final_weight = 0;
+            for (int i = 0; i < num_threads; ++i)
+            {
+                if (!threads[i]->aborted && threads[i]->mst_weight > 0)
+                {
+                    final_weight = threads[i]->mst_weight;
+                    break;
+                }
+            }
+            return final_weight;
+        }
+
         // --- BORUVKA ALGORITMUS ---
         long long boruvkaMST()
         {
@@ -305,10 +771,11 @@ namespace minSpanningTree
 
             while (numTrees > 1)
             {
-                vector<vector<int>> cheapest(V, vector<int>(3, -1));
+                // JAVÍTVA: -1 helyett INT_MAX, nehogy a 0-ás vagy negatív élsúlyok beakadjanak
+                vector<vector<int>> cheapest(V, vector<int>(3, INT_MAX));
 
 #pragma omp parallel for
-                for (size_t i = 0; i < edges.size(); ++i) // size_t jobb az OMP-hez
+                for (size_t i = 0; i < edges.size(); ++i)
                 {
                     const auto &e = edges[i];
                     int set1 = dsu.find(e[0]);
@@ -318,47 +785,42 @@ namespace minSpanningTree
                     {
 #pragma omp critical
                         {
-                            if (cheapest[set1][2] == -1 || cheapest[set1][2] > e[2])
+                            if (cheapest[set1][2] == INT_MAX || cheapest[set1][2] > e[2])
                                 cheapest[set1] = e;
-                            if (cheapest[set2][2] == -1 || cheapest[set2][2] > e[2])
+                            if (cheapest[set2][2] == INT_MAX || cheapest[set2][2] > e[2])
                                 cheapest[set2] = e;
                         }
                     }
                 }
 
                 bool added = false;
-                int weight_delta = 0;
+                long long weight_delta = 0;
                 int trees_merged = 0;
 
-// A reduction(|| : added) automatikusan megoldja a boolean flag problémát!
 #pragma omp parallel for reduction(+ : weight_delta, trees_merged) reduction(|| : added)
                 for (int i = 0; i < V; i++)
                 {
-                    if (cheapest[i][2] != -1)
+                    if (cheapest[i][2] != INT_MAX)
                     {
-                        // lock-free keresés
                         int set1 = dsu.find(cheapest[i][0]);
                         int set2 = dsu.find(cheapest[i][1]);
 
                         if (set1 != set2)
                         {
-                            // FIGYELEM: A unite-nak bool-lal kell visszatérnie!
-                            // Csak akkor vonjuk be a statisztikába, ha EZ a szál csinálta az egyesítést.
                             if (dsu.unite(set1, set2))
                             {
                                 weight_delta += cheapest[i][2];
                                 trees_merged++;
-                                added = true; // A reduction(||) miatt ez teljesen biztonságos
+                                added = true;
                             }
                         }
                     }
                 }
 
-                // A ciklus után frissítjük a globális változókat
                 totalWeight += weight_delta;
-                numTrees -= trees_merged; // Kivonjuk az egyesített fák számát
+                numTrees -= trees_merged;
                 if (!added)
-                    break; // Nem összefüggő gráf
+                    break;
             }
             return totalWeight;
         }
@@ -519,8 +981,18 @@ namespace minSpanningTree
         return 0;
     }
 
+    namespace fs = std::filesystem;
+
+    double get_cpu_time_seconds()
+    {
+        struct timespec ts;
+        clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+        return ts.tv_sec + ts.tv_nsec / 1e9;
+    }
+
     pair<int, vector<array<int, 3>>> read_MST_test(const string &file_name)
     {
+        // vagy megtartjuk az eredeti relatív útvonalat.
         ifstream file("../test_input/spanning_tree_test/" + file_name);
         if (!file.is_open())
         {
@@ -554,110 +1026,277 @@ namespace minSpanningTree
         return {n, result};
     }
 
-    void testMSTAlgorithms(int execution_count, int timeout_sec)
+    struct TestCase
     {
-        // 1. Gráf beolvasása és felépítése
-        auto graph_info = read_MST_test("custom_test.in");
-        int V = graph_info.first;
-        const auto &edges_data = graph_info.second;
+        string filename;
+        int V;
+        int E;
+        vector<array<int, 3>> edges;
+    };
 
-        // Létrehozunk egy alap gráfot, amit referenciaként használunk
-        minSpanningTree::Graph g(V);
-        for (const auto &edge : edges_data)
+    void measureAllMSTAlgorithms(string folder_name, int execution_count, int timeout_sec)
+    {
+        string input_dir = "../test_input/spanning_tree_test/";
+
+        // 1. CSAK A FÁJLNEVEK beolvasása (Memóriatakarékos!)
+        vector<string> test_files;
+        if (!fs::exists(input_dir))
         {
-            g.addEdge(edge[0], edge[1], edge[2]);
+            cerr << "Hiba: A teszt mappa nem talalhato: " << input_dir << endl;
+            return;
         }
 
-        // 2. Függvények regisztrálása (lambda-k segítségével, hogy a 'g' példányon fussanak)
-        // Mivel az MST függvények int-et adnak vissza, a map-et is ehhez igazítjuk
-        map<string, function<long long()>> functions = {
-            {"Kruskal", [&]()
-             { return g.kruskalMST(); }},
-            {"Prim (matrix)", [&]()
-             { return g.primMSTMatrix(); }},
-            {"Prim (list)", [&]()
-             { return g.primMSTOptimal(); }},
-            {"Boruvka", [&]()
-             { return g.boruvkaMST(); }},
-            {"Naiv parallel Boruvka", [&]()
-             { return g.naivParallelBoruvkaMST(); }},
-            {"Buffered parallel Boruvka", [&]()
-             { return g.bufferedParallelBoruvkaMST(); }},
-            {"CAS parallel Boruvka", [&]()
-             { return g.casParallelBoruvkaMST(); }},
+        cout << "[INFO] Tesztfájlok neveinek beolvasása a " << input_dir << " mappából..." << endl;
+        for (const auto &entry : fs::directory_iterator(input_dir))
+        {
+            if (entry.path().extension() == ".in")
+            {
+                test_files.push_back(entry.path().filename().string());
+            }
+        }
+
+        if (test_files.empty())
+        {
+            cout << "Nem talalhato ervenyes .in fajl a mappaban!" << endl;
+            return;
+        }
+
+        // Fájlnevek sorbarendezése.
+        // A "01.in", "02.in", "10.in" formátum miatt a sima ABC sorrend (lexikografikus) tökéletesen működik.
+        sort(test_files.begin(), test_files.end());
+
+        // 2. Algoritmusok regisztrálása
+        struct AlgDef
+        {
+            string name;
+            function<long long(Graph &)> func;
         };
 
-        cout << "\n"
-             << setfill('=') << setw(100) << "" << endl;
-        cout << " MST ALGORITHM BENCHMARK | Vertices: " << V << " | Iterations: " << execution_count << endl;
-        cout << setfill('=') << setw(100) << "" << setfill(' ') << endl;
-        cout << left << setw(25) << "Algorithm"
-             << setw(15) << "Result (Cost)"
-             << setw(15) << "Avg Time (s)"
-             << setw(15) << "Fastest (s)"
-             << "Status" << endl;
-        cout << string(100, '-') << endl;
+        vector<AlgDef> algorithms = {
+            // {"Kruskal", [](Graph &g)
+            //  { return g.kruskalMST(); }},
+            // {"Prim Matrix", [](Graph &g)
+            //  { return g.primMSTMatrix(); }},
+            // {"Prim List", [](Graph &g)
+            //  { return g.primMSTOptimal(); }},
+            {"Parallel Prim", [](Graph &g)
+             { return g.parallelPrimSetiaMST(); }},
+            // {"Boruvka", [](Graph &g)
+            //  { return g.boruvkaMST(); }},
+            // {"Naiv Parallel Boruvka", [](Graph &g)
+            //  { return g.naivParallelBoruvkaMST(); }},
+            // {"Buffered Parallel Boruvka", [](Graph &g)
+            //  { return g.bufferedParallelBoruvkaMST(); }},
+            // {"CAS Parallel Boruvka", [](Graph &g)
+            //  { return g.casParallelBoruvkaMST(); }}
+        };
 
-        // Tároljuk az első sikeres futás eredményét, hogy ellenőrizzük a többiek helyességét
-        long long reference_cost = -1;
+        // 3. Adminisztrációs és CSV változók előkészítése
+        map<string, ofstream> alg_files;
+        map<string, double> total_wall_time;
+        map<string, double> total_cpu_time;
+        map<string, int> files_processed_count;
+        map<string, string> max_graph_reached;
+        map<string, string> final_status;
+        set<string> timed_out_algorithms;
 
-        for (auto const &[name, func] : functions)
+        string output_dir = "../test_data/mst/";
+        if (folder_name != "")
+            output_dir += folder_name + "/";
+        fs::create_directories(output_dir);
+
+        for (const auto &alg : algorithms)
         {
-            double total_time = 0, fastest = 1e9, slowest = 0;
-            bool failed = false, timed_out = false;
-            int current_result = 0;
+            string clean_name = alg.name;
+            replace(clean_name.begin(), clean_name.end(), ' ', '_');
+            string filename = output_dir + clean_name + "_results.csv";
 
-            for (int i = 0; i < execution_count; ++i)
+            alg_files[alg.name].open(filename);
+            if (alg_files[alg.name].is_open())
             {
-                auto start = chrono::high_resolution_clock::now();
-
-                // Async hívás a timeout kezeléséhez
-                future<long long> fut = async(launch::async, func);
-
-                if (fut.wait_for(chrono::seconds(timeout_sec)) == future_status::timeout)
-                {
-                    timed_out = true;
-                    break;
-                }
-
-                current_result = fut.get();
-
-                auto end = chrono::high_resolution_clock::now();
-                double duration = chrono::duration<double>(end - start).count();
-
-                // Eredmény validálása: minden algoritmusnak ugyanazt a költséget kell visszaadnia
-                if (reference_cost == -1)
-                    reference_cost = current_result;
-                if (current_result != reference_cost)
-                {
-                    failed = true;
-                    break;
-                }
-
-                total_time += duration;
-                fastest = min(fastest, duration);
-                slowest = max(slowest, duration);
+                alg_files[alg.name] << "File,Vertices,Edges,Wall_Avg_s,CPU_Work_s,Wall_Fast_s,Wall_Slow_s,Status\n";
             }
 
-            cout << left << setw(25) << name;
+            final_status[alg.name] = "SUCCESS";
+            max_graph_reached[alg.name] = "None";
+            total_wall_time[alg.name] = 0.0;
+            total_cpu_time[alg.name] = 0.0;
+            files_processed_count[alg.name] = 0;
+        }
 
-            if (timed_out)
+        auto benchmark_start = chrono::high_resolution_clock::now();
+        cout << "\n[INFO] MST Benchmarking started..." << endl;
+
+        // 4. Fő tesztelési ciklus (LAZY LOADING - Csak azt a fájlt töltjük be, amelyiket épp teszteljük)
+        for (const string &current_filename : test_files)
+        {
+            // --- GRÁF BEOLVASÁSA A MEMÓRIÁBA ---
+            auto graph_info = read_MST_test(current_filename);
+            int current_V = graph_info.first;
+            const auto &current_edges = graph_info.second;
+            int current_E = current_edges.size();
+
+            if (current_V == 0)
             {
-                cout << setw(15) << "-" << "\033[33mTIMEOUT\033[0m" << endl;
+                cerr << "[Hiba] Nem sikerult beolvasni vagy ures a fajl: " << current_filename << endl;
+                continue; // Hibás fájl ugrása
             }
-            else if (failed)
+
+            cout << "\n--- Teszteles: " << current_filename << " (V: " << current_V << ", E: " << current_E << ") ---" << endl;
+
+            // Alap referencia gráf a helyesség (Cost) ellenőrzéséhez
+            Graph base_graph(current_V);
+            for (const auto &edge : current_edges)
             {
-                cout << setw(15) << current_result << "\033[31mFAILED (Wrong Cost)\033[0m" << endl;
+                base_graph.addEdge(edge[0], edge[1], edge[2]);
+            }
+            long long expected_cost = base_graph.kruskalMST();
+
+            for (const auto &alg : algorithms)
+            {
+                string name = alg.name;
+
+                if (timed_out_algorithms.count(name))
+                {
+                    if (alg_files[name].is_open())
+                    {
+                        alg_files[name] << current_filename << "," << current_V << "," << current_E << ",,,,,SKIPPED\n";
+                    }
+                    continue;
+                }
+
+                // Explicit védelem a Prim Mátrix ellen óriási gráfoknál
+                if (name == "Prim Matrix" && current_V > 10000)
+                {
+                    timed_out_algorithms.insert(name);
+                    final_status[name] = "SKIPPED (>10k Vertices)";
+                    if (alg_files[name].is_open())
+                        alg_files[name] << current_filename << "," << current_V << "," << current_E << ",,,,,SKIPPED\n";
+                    continue;
+                }
+
+                double sum_wall_time = 0, sum_cpu_time = 0;
+                double fastest_wall = 1e9, slowest_wall = 0;
+                bool failed = false, timed_out = false;
+                int actual_iterations = 0;
+
+                for (int i = 0; i < execution_count; ++i)
+                {
+                    // Új gráf építése a memóriában már ott lévő él-listából
+                    Graph g(current_V);
+                    for (const auto &edge : current_edges)
+                    {
+                        g.addEdge(edge[0], edge[1], edge[2]);
+                    }
+
+                    auto wall_start = chrono::high_resolution_clock::now();
+                    double cpu_start = get_cpu_time_seconds();
+
+                    // KÖZVETLEN (Szinkron) futtatás
+                    long long result_cost = alg.func(g);
+
+                    double cpu_end = get_cpu_time_seconds();
+                    auto wall_end = chrono::high_resolution_clock::now();
+
+                    double wall_duration = chrono::duration<double>(wall_end - wall_start).count();
+                    double cpu_duration = cpu_end - cpu_start;
+
+                    if (result_cost != expected_cost)
+                    {
+                        failed = true;
+                        final_status[name] = "FAILED (Cost: " + to_string(result_cost) + " != " + to_string(expected_cost) + ")";
+                        break;
+                    }
+
+                    sum_wall_time += wall_duration;
+                    sum_cpu_time += cpu_duration;
+                    fastest_wall = min(fastest_wall, wall_duration);
+                    slowest_wall = max(slowest_wall, wall_duration);
+                    actual_iterations++;
+
+                    if (wall_duration > timeout_sec)
+                    {
+                        timed_out = true;
+                        timed_out_algorithms.insert(name);
+                        final_status[name] = "TIMEOUT";
+                        break;
+                    }
+                }
+
+                if (alg_files[name].is_open())
+                {
+                    alg_files[name] << current_filename << "," << current_V << "," << current_E << ",";
+                    if (timed_out)
+                        alg_files[name] << ",,,,TIMEOUT\n";
+                    else if (failed)
+                        alg_files[name] << ",,,,FAILED\n";
+                    else
+                    {
+                        alg_files[name] << fixed << setprecision(6)
+                                        << (sum_wall_time / actual_iterations) << ","
+                                        << (sum_cpu_time / actual_iterations) << ","
+                                        << fastest_wall << ","
+                                        << slowest_wall << ","
+                                        << "SUCCESS\n";
+                    }
+                }
+
+                if (!failed && !timed_out)
+                {
+                    max_graph_reached[name] = current_filename;
+                    total_wall_time[name] += (sum_wall_time / actual_iterations);
+                    total_cpu_time[name] += (sum_cpu_time / actual_iterations);
+                    files_processed_count[name]++;
+                }
+            }
+
+            // Itt ér véget a 'current_filename' ciklusa.
+            // A graph_info, current_edges, base_graph megsemmisülnek, és a lefoglalt RAM felszabadul!
+        }
+
+        // --- TERMINÁL ÖSSZEFOGLALÓ JELENTÉS ---
+        auto benchmark_end = chrono::high_resolution_clock::now();
+        double benchmark_duration = chrono::duration<double>(benchmark_end - benchmark_start).count();
+
+        cout << "\n"
+             << setfill('=') << setw(120) << "" << endl;
+        cout << " FINAL MST BENCHMARK SUMMARY REPORT - Total Time: " << benchmark_duration << " (s)" << endl;
+        cout << setfill('=') << setw(120) << "" << setfill(' ') << endl;
+        cout << left << setw(30) << "Algorithm"
+             << setw(20) << "Max File Reached"
+             << setw(20) << "Total Avg Wall(s)"
+             << setw(20) << "Total Avg CPU(s)"
+             << "Final Status" << endl;
+        cout << string(120, '-') << endl;
+
+        for (const auto &alg : algorithms)
+        {
+            string name = alg.name;
+            cout << left << setw(30) << name;
+            cout << setw(20) << max_graph_reached[name];
+
+            if (files_processed_count[name] > 0)
+            {
+                cout << fixed << setprecision(6)
+                     << setw(20) << (total_wall_time[name] / files_processed_count[name])
+                     << setw(20) << (total_cpu_time[name] / files_processed_count[name]);
             }
             else
             {
-                cout << setw(15) << current_result
-                     << fixed << setprecision(6)
-                     << setw(15) << (total_time / execution_count)
-                     << setw(15) << fastest
-                     << "\033[32mSUCCESS\033[0m" << endl;
+                cout << setw(20) << "-" << setw(20) << "-";
             }
+
+            if (final_status[name] == "TIMEOUT" || final_status[name].find("SKIPPED") != string::npos)
+                cout << "\033[33m" << final_status[name] << "\033[0m" << endl;
+            else if (final_status[name].find("FAILED") != string::npos)
+                cout << "\033[31m" << final_status[name] << "\033[0m" << endl;
+            else
+                cout << "\033[32mSUCCESS\033[0m" << endl;
+
+            if (alg_files[name].is_open())
+                alg_files[name].close();
         }
-        cout << setfill('=') << setw(100) << "" << setfill(' ') << endl;
+        cout << setfill('=') << setw(120) << "" << setfill(' ') << endl;
     }
+
 } // namespace minSpanningTree

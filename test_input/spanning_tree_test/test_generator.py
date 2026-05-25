@@ -45,4 +45,4 @@ def generate_mst_test_fast(filename, V, E, max_weight=1000000000):
 
     print(f"Generálva: {filename}")
 
-generate_mst_test_fast("custom_test.in", 10_000, 250_000, max_weight=1_000_000_000)
+generate_mst_test_fast("dense_1.in", 1000, 750_000, max_weight=1_000_000_000)

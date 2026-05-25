@@ -9,7 +9,7 @@ Egy $n$ elemű tömb elemeinek növekvő sorrendbe történő rendezése $k$ pá
 - **Komplexitás:** 
 	- Idő: $O(n^2)$,
 	- Hely: $O(1)$ (In-place). 
-	- Párhuzamos idő: $O(n\frac{n}{k})$ - n-szer minden szomszédos elemet összehasonlítunk és megcserélünk, egyszer a 0. egyszer pedig az 1. elemtől kezdve
+	- Párhuzamos idő: $O(\frac{n^2}{k})$ - n-szer minden szomszédos elemet összehasonlítunk és megcserélünk, egyszer a 0. egyszer pedig az 1. elemtől kezdve
     
 - **Leírás:** A klasszikus buborékrendezés párhuzamosításra optimalizált változata. Két váltakozó fázisból áll: a páratlan fázisban a `(1, 2), (3, 4)...` indexű párokat, a páros fázisban a `(2, 3), (4, 5)...` indexű szomszédos elemeket hasonlítjuk össze és cseréljük fel szükség esetén.
     
@@ -70,8 +70,11 @@ Egy $n$ elemű tömb elemeinek növekvő sorrendbe történő rendezése $k$ pá
         - **$O(1)$ dinamikus memóriafoglalás a futás alatt:** Az összefésüléshez szükséges átmeneti tömb (`temp`) csupán egyszer, a rendezés legelső lépése előtt kerül lefoglalásra, majd referenciaként passzolódik a rekurzióban. Ez drasztikusan csökkenti a memóriakezelési időt.
             
         - **Adatbiztonság (Data Race elkerülése):** A közös `temp` tömb használata a párhuzamos taszkok között teljesen biztonságos, mert a fa adott szintjén a szálak szigorúan diszjunkt (egymást nem átfedő) memóriatartományokba írnak és olvasnak.
-            
-        - **Soros szűk keresztmetszet:** Az összefésülést (`merge`) a szinkronizáció után már csak egy szál végzi. Ez Amdahl törvénye értelmében a párhuzamos gyorsítás elméleti korlátját jelenti nagy adathalmazoknál.
+	        
+		- **Öszzefésülés:**
+	        - **Soros szűk keresztmetszet:** A merge sort algoritmusnál összefésülést (`merge`) a szinkronizáció után már csak egy szál végzi. Ez Amdahl törvénye értelmében a párhuzamos gyorsítás elméleti korlátját jelenti nagy adathalmazoknál.
+    
+			-  **Párhuzamos megvalósítás:** A párhuzamos összefésülést **Blokkokra bontással (Block Decomposition)** és **Bináris kereséssel** valósítottam meg. Így az OpenMP szálak egymástól teljesen független, diszjunkt memóriaterületeken tudtak dolgozni (elkerülve a Data Race-t), és a visszamásolás fázisát is párhuzamosítottam a maximális memória-sávszélesség kihasználásához.
             
 
 ### 4. Odd-Even Merge Sort (Batcher-féle rendező hálózat)
@@ -96,6 +99,8 @@ Egy $n$ elemű tömb elemeinek növekvő sorrendbe történő rendezése $k$ pá
             
         - **Küszöbérték alkalmazása:** Hasonlóan a többi fa-struktúrájú algoritmushoz, a megfelelő szint elérése után soros fall-back mechanizmust használ az overhead minimalizálása érdekében.
 
+	- *Lehetséges problémák:*
+		- A modern CPU-k gyorsítótára (L1/L2 Cache) az egymás utáni memóriahozzáférést (szekvenciális olvasás) preferálja. Mivel az Odd-Even Merge algoritmus a ciklusokban hatalmas lépésközökkel "ugrál" a memóriában, folyamatos Cache Miss (gyorsítótár-tévesztés) lép fel. Emiatt a CPU folyamatosan a lassú RAM-ra vár. Ez az oka, hogy ez az algoritmus szoftveres CPU környezetben elvérzik, és inkább GPU-kra való.
 ## Mérések és következtetések
 ![sorting_benchmark_plot_full](pictures/sorting_benchmark_plot_full.png)
 ![sorting_benchmark_plot_full_log](pictures/sorting_benchmark_plot_full_log.png)

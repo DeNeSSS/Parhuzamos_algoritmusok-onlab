@@ -22,8 +22,10 @@ int main()
     // minSearch::measureMinSearchAlgorithms(100000, 100000000, exponental, "full", 5, 5);
     // minSearch::measureMinSearchAlgorithms(100000, 100000, exponental, "test", 3, 5);
 
-    sorting::measureSortingAlgorithms(100000, 100000000, exponental, "mergeSort");
+    // sorting::measureSortingAlgorithms(100000, 100000000, exponental, "mergeSort");
     // sorting::measureSortingAlgorithms(pow(2, 17), pow(2, 24), powerOfTwo, "powerOfTwo");
 
     // sorting::measureSortingAlgorithms(1000000, 3, 5);
+
+    minSpanningTree::measureAllMSTAlgorithms();
 }
