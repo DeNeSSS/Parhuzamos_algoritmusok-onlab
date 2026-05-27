@@ -19,11 +19,18 @@
 #include <vector>
 #include <random>
 
+#include <ext/pb_ds/priority_queue.hpp>
+
 #include "minSpanningTree.h"
 
 namespace minSpanningTree
 {
     using namespace std;
+    namespace pb = __gnu_pbds;
+
+    // =========================================================================
+    // DSU SEGÉDOSZTÁLYOK
+    // =========================================================================
 
     class DSU
     {
@@ -59,7 +66,6 @@ namespace minSpanningTree
         }
     };
 
-    // Közös Disjoint Set Union segédosztály
     class ParallelDSU
     {
         unique_ptr<atomic<int>[]> parent;
@@ -95,7 +101,6 @@ namespace minSpanningTree
 
         bool unite(int x, int y)
         {
-
             while (true)
             {
                 int s1 = find(x);
@@ -110,7 +115,7 @@ namespace minSpanningTree
                 int new_s2 = parent[s2].load(memory_order_relaxed);
                 if (new_s1 != s1 || new_s2 != s2)
                 {
-                    continue; // Vissza a while(true) elejére
+                    continue;
                 }
 
                 if (rank[s1] < rank[s2])
@@ -128,46 +133,21 @@ namespace minSpanningTree
         }
     };
 
-    class Graph
+    // =========================================================================
+    // 1. KRUSKAL SOLVER
+    // =========================================================================
+
+    class KruskalSolver
     {
     private:
         int V;
-        // 1. Éllista (u, v, w) - Kruskal és Boruvka számára
-        vector<vector<int>> edges;
-        // 2. Szomszédsági lista (szomszéd, súly) - Optimális Prim számára
-        vector<vector<pair<int, int>>> adj;
-        // 3. Szomszédsági mátrix - Klasszikus Prim számára
-        vector<vector<int>> matrix;
-
-        const int TREASHOLD = 100;
+        const vector<vector<int>> &edges;
 
     public:
-        Graph(int vertices) : V(vertices)
-        {
-            adj.resize(V);
-            // Csak akkor foglaljunk mátrixot, ha kicsi a gráf!
-            if (V < 10000)
-            {
-                matrix.resize(V, vector<int>(V, 0));
-            }
-        }
+        KruskalSolver(int V, const vector<vector<int>> &edges) : V(V), edges(edges) {}
 
-        void addEdge(int u, int v, int w)
+        long long solve()
         {
-            edges.push_back({u, v, w});
-            adj[u].push_back({v, w});
-            adj[v].push_back({u, w});
-            if (V < 10000)
-            {
-                matrix[u][v] = w;
-                matrix[v][u] = w;
-            }
-        }
-
-        // --- KRUSKAL ALGORITMUS ---
-        long long kruskalMST()
-        {
-            // Prioritási sor az élek súly szerinti rendezéséhez
             auto cmp = [](const vector<int> &a, const vector<int> &b)
             { return a[2] > b[2]; };
             priority_queue<vector<int>, vector<vector<int>>, decltype(cmp)> pq(cmp);
@@ -192,9 +172,24 @@ namespace minSpanningTree
             }
             return cost;
         }
+    };
 
-        // --- KLASSZIKUS PRIM (Mátrixszal, O(V^2)) ---
-        long long primMSTMatrix()
+    // =========================================================================
+    // 2. MÁTRIX ÉS LISTA PRIM SOLVER
+    // =========================================================================
+
+    class PrimSolver
+    {
+    private:
+        int V;
+        const vector<vector<pair<int, int>>> &adj;
+        const vector<vector<int>> &matrix;
+
+    public:
+        PrimSolver(int V, const vector<vector<pair<int, int>>> &adj, const vector<vector<int>> &matrix)
+            : V(V), adj(adj), matrix(matrix) {}
+
+        long long solveMatrix()
         {
             if (V >= 10000)
             {
@@ -215,7 +210,7 @@ namespace minSpanningTree
                         min = key[v], u = v;
 
                 if (min == INT_MAX)
-                    break; // Gráf nem összefüggő
+                    break;
 
                 mstSet[u] = true;
                 totalCost += key[u];
@@ -227,8 +222,7 @@ namespace minSpanningTree
             return totalCost;
         }
 
-        // --- OPTIMÁLIS PRIM (Szomszédsági listával és kupaccal, O(E log V)) ---
-        long long primMSTOptimal()
+        long long solveList()
         {
             priority_queue<pair<int, int>, vector<pair<int, int>>, greater<pair<int, int>>> pq;
             vector<bool> visited(V, false);
@@ -253,520 +247,22 @@ namespace minSpanningTree
             }
             return totalCost;
         }
+    };
 
-        // --- SETIA ET AL. PARALLEL PRIM ALGORITMUS ---
-        long long parallelPrimSetiaMST()
-        {
-            int num_threads = omp_get_max_threads();
+    // =========================================================================
+    // 3. BORUVKA SOLVER (SZEKVENCIÁLIS ÉS PÁRHUZAMOS)
+    // =========================================================================
 
-            struct ThreadData
-            {
-                mutex mtx;
-                bool aborted = false;
-                long long mst_weight = 0;
-                priority_queue<pair<int, pair<int, int>>,
-                               vector<pair<int, pair<int, int>>>,
-                               greater<>>
-                    pq;
-            };
-            vector<unique_ptr<ThreadData>> threads(num_threads);
-            for (int i = 0; i < num_threads; ++i)
-                threads[i] = make_unique<ThreadData>();
+    class BoruvkaSolver
+    {
+    private:
+        int V;
+        const vector<vector<int>> &edges;
 
-            struct NodeData
-            {
-                mutex mtx;
-                int color = -1;
-            };
-            vector<unique_ptr<NodeData>> nodes(V);
-            for (int i = 0; i < V; ++i)
-                nodes[i] = make_unique<NodeData>();
+    public:
+        BoruvkaSolver(int V, const vector<vector<int>> &edges) : V(V), edges(edges) {}
 
-            ParallelDSU dsu(V);
-            atomic<int> uncolored_count(V);
-
-            auto merge_pqs = [](auto &dest, auto &src)
-            {
-                while (!src.empty())
-                {
-                    dest.push(src.top());
-                    src.pop();
-                }
-            };
-
-#pragma omp parallel
-            {
-                int tid = omp_get_thread_num();
-                auto &my_thread = *threads[tid];
-
-                // Thread-local véletlenszám-generátor: minden szálnak saját, lock-mentes példánya van
-                thread_local std::mt19937 gen(std::random_device{}() + tid);
-                std::uniform_int_distribution<int> dist(0, V - 1);
-
-                while (uncolored_count.load(memory_order_relaxed) > 0)
-                {
-                    int root = -1;
-
-                    // 1. Heurisztika: Véletlenszerű uncolored gyökér keresése (Wrap-around find-Min helyettesítője)
-                    for (int attempt = 0; attempt < 50; ++attempt)
-                    {
-                        int r = dist(gen);
-                        int r_set = dsu.find(r);
-                        if (nodes[r_set]->color == -1)
-                        {
-                            root = r;
-                            break;
-                        }
-                    }
-                    // Ha a véletlen nem talált, szekvenciális keresés
-                    if (root == -1)
-                    {
-                        for (int i = 0; i < V; ++i)
-                        {
-                            int r_set = dsu.find(i);
-                            if (nodes[r_set]->color == -1)
-                            {
-                                root = i;
-                                break;
-                            }
-                        }
-                    }
-                    if (root == -1)
-                    {
-                        break; // Minden csúcs ki van színezve
-                    }
-
-                    // 2. Gyökér lefoglalása és színezése
-                    int root_set = dsu.find(root);
-                    bool root_acquired = false;
-                    {
-                        lock_guard<mutex> lk(nodes[root_set]->mtx);
-                        if (nodes[root_set]->color == -1)
-                        {
-                            nodes[root_set]->color = tid;
-                            uncolored_count--;
-                            root_acquired = true;
-                        }
-                    }
-                    if (!root_acquired)
-                    {
-                        continue;
-                    }
-
-                    // 3. Szál inicializálása (új MST építésének kezdete)
-                    {
-                        lock_guard<mutex> lk(my_thread.mtx);
-                        my_thread.aborted = false;
-                        my_thread.mst_weight = 0;
-                        while (!my_thread.pq.empty())
-                            my_thread.pq.pop();
-
-                        // Szomszédok bedobása a prioritási sorba
-                        for (auto &edge : adj[root])
-                        {
-                            my_thread.pq.push({edge.second, {root, edge.first}});
-                        }
-                    }
-
-                    // 4. Belső Prim iteráció (MinNode keresés és fa növelés)
-                    // 4. Belső Prim iteráció (MinNode keresés és fa növelés)
-                    while (true)
-                    {
-                        pair<int, pair<int, int>> min_edge;
-                        {
-                            lock_guard<mutex> lk(my_thread.mtx);
-                            // 1. LÉPÉS: Csak megnézzük az élt (PEEK), de NEM vesszük ki!
-                            if (my_thread.aborted || my_thread.pq.empty())
-                                break;
-                            min_edge = my_thread.pq.top();
-                        }
-
-                        int w = min_edge.first;
-                        int u = min_edge.second.first;
-                        int v = min_edge.second.second;
-
-                        int root_u = dsu.find(u);
-                        int root_v = dsu.find(v);
-
-                        // Ha az él két végpontja már egy fában van (belső él)
-                        if (root_u == root_v)
-                        {
-                            lock_guard<mutex> lk(my_thread.mtx);
-                            if (!my_thread.aborted)
-                                my_thread.pq.pop(); // Eldobjuk
-                            continue;
-                        }
-
-                        int c = -2;
-                        {
-                            // Egyszerre lockoljuk a szálat és a célpont gyökerét
-                            scoped_lock lk(my_thread.mtx, nodes[root_v]->mtx);
-
-                            if (my_thread.aborted)
-                                break;
-
-                            // Leellenőrizzük, hogy root_v még mindig gyökér-e
-                            if (dsu.find(v) != root_v)
-                                continue; // Megváltozott! Hagyjuk a sorban az élt és újrapróbáljuk.
-
-                            c = nodes[root_v]->color;
-                            if (c == -1)
-                            {
-                                // Sikeresen elfoglaltunk egy új csúcsot
-                                nodes[root_v]->color = tid;
-                                uncolored_count--;
-                                my_thread.mst_weight += w;
-
-                                // FELHASZNÁLTUK AZ ÉLT, MOST VESSZÜK KI A SORBÓL!
-                                my_thread.pq.pop();
-
-                                for (auto &edge : adj[v])
-                                {
-                                    my_thread.pq.push({edge.second, {v, edge.first}});
-                                }
-                            }
-                        }
-
-                        if (c == -1)
-                        {
-                            // Lockok nélkül egyesítjük a két fát
-                            dsu.unite(root_u, root_v);
-                            continue;
-                        }
-
-                        if (c == tid)
-                        {
-                            // Közben a mi fánk része lett egy másik ágon
-                            lock_guard<mutex> lk(my_thread.mtx);
-                            if (!my_thread.aborted)
-                                my_thread.pq.pop(); // Eldobjuk
-                            continue;
-                        }
-
-                        // B) ÜTKÖZÉS EGY MÁSIK SZÁLLAL!
-                        int j = c;
-                        int m1 = min(tid, j);
-                        int m2 = max(tid, j);
-
-                        int rm1 = min(root_u, root_v);
-                        int rm2 = max(root_u, root_v);
-
-                        {
-                            // 4 Mutex egyidejű, holtpontmentes lockolása
-                            scoped_lock lk(threads[m1]->mtx, threads[m2]->mtx, nodes[rm1]->mtx, nodes[rm2]->mtx);
-
-                            if (my_thread.aborted)
-                                break;
-
-                            // Ha még mindig fennállnak a feltételek
-                            if (dsu.find(u) == root_u && dsu.find(v) == root_v && nodes[root_v]->color == j && !threads[j]->aborted)
-                            {
-                                if (tid < j)
-                                {
-                                    // 1. Eset: Mi nyerünk, 'j' a vesztes
-                                    my_thread.mst_weight += w + threads[j]->mst_weight;
-                                    my_thread.pq.pop(); // Sikeres beolvasztás, az élt kivesszük
-                                    merge_pqs(my_thread.pq, threads[j]->pq);
-                                    threads[j]->aborted = true;
-
-                                    nodes[root_v]->color = tid;
-                                    nodes[root_u]->color = tid;
-                                    dsu.unite(root_u, root_v);
-                                }
-                                else
-                                {
-                                    // 2. Eset: 'j' a nyertes, mi vagyunk a vesztes
-                                    threads[j]->mst_weight += w + my_thread.mst_weight;
-                                    my_thread.pq.pop(); // Átadjuk az élt, kivesszük a saját sorunkból
-                                    merge_pqs(threads[j]->pq, my_thread.pq);
-                                    my_thread.aborted = true;
-
-                                    nodes[root_u]->color = j;
-                                    nodes[root_v]->color = j;
-                                    dsu.unite(root_u, root_v);
-                                    break;
-                                }
-                            }
-                            // Ha a feltételek elromlottak (pl. 'j' közben meghalt),
-                            // a szál békésen továbblép. Mivel NEM hívtunk pop()-ot,
-                            // az él biztonságban vár a pq tetején a következő ciklusra!
-                        }
-                    }
-                }
-            }
-
-            long long final_weight = 0;
-            for (int i = 0; i < num_threads; ++i)
-            {
-                if (!threads[i]->aborted && threads[i]->mst_weight > 0)
-                {
-                    final_weight = threads[i]->mst_weight;
-                    break;
-                }
-            }
-            return final_weight;
-        }
-
-        long long parallelPrimHeuristicSetiaMST()
-        {
-            int num_threads = omp_get_max_threads();
-
-            struct ThreadData
-            {
-                mutex mtx;
-                bool aborted = false;
-                long long mst_weight = 0;
-                priority_queue<pair<int, pair<int, int>>,
-                               vector<pair<int, pair<int, int>>>,
-                               greater<>>
-                    pq;
-                int tree_size = 0;
-                int small_tree_count = 0;
-                int root_search_count = 0;
-            };
-            vector<unique_ptr<ThreadData>> threads(num_threads);
-            for (int i = 0; i < num_threads; ++i)
-                threads[i] = make_unique<ThreadData>();
-
-            struct NodeData
-            {
-                mutex mtx;
-                int color = -1;
-            };
-            vector<unique_ptr<NodeData>> nodes(V);
-            for (int i = 0; i < V; ++i)
-                nodes[i] = make_unique<NodeData>();
-
-            ParallelDSU dsu(V);
-
-            auto merge_pqs = [](auto &dest, auto &src)
-            {
-                while (!src.empty())
-                {
-                    dest.push(src.top());
-                    src.pop();
-                }
-            };
-
-#pragma omp parallel
-            {
-                int tid = omp_get_thread_num();
-                auto &my_thread = *threads[tid];
-
-                // Thread-local véletlenszám-generátor: minden szálnak saját, lock-mentes példánya van
-                thread_local std::mt19937 gen(std::random_device{}() + tid);
-                std::uniform_int_distribution<int> dist(0, V - 1);
-
-                while (my_thread.small_tree_count < this->TREASHOLD &&
-                       my_thread.root_search_count < this->TREASHOLD)
-                {
-                    // 1. Gyökér keresése
-                    int root = -1;
-                    int r = dist(gen);
-                    int r_set = dsu.find(r);
-                    if (nodes[r_set]->color == -1)
-                    {
-                        root = r;
-                        my_thread.root_search_count = 0;
-                    }
-                    else
-                    {
-                        my_thread.root_search_count++;
-                        continue;
-                    }
-
-                    // 2. Gyökér lefoglalása és színezése
-                    int root_set = dsu.find(root);
-                    bool root_acquired = false;
-                    {
-                        lock_guard<mutex> lk(nodes[root_set]->mtx);
-                        if (nodes[root_set]->color == -1)
-                        {
-                            nodes[root_set]->color = tid;
-                            root_acquired = true;
-                        }
-                    }
-                    if (!root_acquired)
-                    {
-                        continue;
-                    }
-
-                    // 3. Szál inicializálása (új MST építésének kezdete)
-                    {
-                        lock_guard<mutex> lk(my_thread.mtx);
-                        my_thread.aborted = false;
-                        my_thread.mst_weight = 0;
-                        while (!my_thread.pq.empty())
-                            my_thread.pq.pop();
-
-                        // Szomszédok bedobása a prioritási sorba
-                        for (auto &edge : adj[root])
-                        {
-                            my_thread.pq.push({edge.second, {root, edge.first}});
-                        }
-                    }
-
-                    // 4. Belső Prim iteráció (MinNode keresés és fa növelés)
-                    while (true)
-                    {
-                        pair<int, pair<int, int>> min_edge;
-                        {
-                            lock_guard<mutex> lk(my_thread.mtx);
-                            // 1. LÉPÉS: Csak megnézzük az élt (PEEK), de NEM vesszük ki!
-                            if (my_thread.aborted || my_thread.pq.empty())
-                                break;
-                            min_edge = my_thread.pq.top();
-                        }
-
-                        int w = min_edge.first;
-                        int u = min_edge.second.first;
-                        int v = min_edge.second.second;
-
-                        int root_u = dsu.find(u);
-                        int root_v = dsu.find(v);
-
-                        // Ha az él két végpontja már egy fában van (belső él)
-                        if (root_u == root_v)
-                        {
-                            lock_guard<mutex> lk(my_thread.mtx);
-                            if (!my_thread.aborted)
-                                my_thread.pq.pop(); // Eldobjuk
-                            continue;
-                        }
-
-                        int c = -2;
-                        {
-                            // Egyszerre lockoljuk a szálat és a célpont gyökerét
-                            scoped_lock lk(my_thread.mtx, nodes[root_v]->mtx);
-
-                            if (my_thread.aborted)
-                                break;
-
-                            // Leellenőrizzük, hogy root_v még mindig gyökér-e
-                            if (dsu.find(v) != root_v)
-                                continue; // Megváltozott! Hagyjuk a sorban az élt és újrapróbáljuk.
-
-                            c = nodes[root_v]->color;
-                            if (c == -1)
-                            {
-                                // Sikeresen elfoglaltunk egy új csúcsot
-                                nodes[root_v]->color = tid;
-                                my_thread.mst_weight += w;
-
-                                // FELHASZNÁLTUK AZ ÉLT, MOST VESSZÜK KI A SORBÓL!
-                                my_thread.pq.pop();
-
-                                for (auto &edge : adj[v])
-                                {
-                                    my_thread.pq.push({edge.second, {v, edge.first}});
-                                }
-
-                                my_thread.tree_size++;
-                            }
-                        }
-
-                        if (c == -1)
-                        {
-                            // Lockok nélkül egyesítjük a két fát
-                            dsu.unite(root_u, root_v);
-                            continue;
-                        }
-
-                        if (c == tid)
-                        {
-                            // Közben a mi fánk része lett egy másik ágon
-                            lock_guard<mutex> lk(my_thread.mtx);
-                            if (!my_thread.aborted)
-                                my_thread.pq.pop(); // Eldobjuk
-                            continue;
-                        }
-
-                        // B) ÜTKÖZÉS EGY MÁSIK SZÁLLAL!
-                        int j = c;
-                        int m1 = min(tid, j);
-                        int m2 = max(tid, j);
-
-                        int rm1 = min(root_u, root_v);
-                        int rm2 = max(root_u, root_v);
-
-                        {
-                            // 4 Mutex egyidejű, holtpontmentes lockolása
-                            scoped_lock lk(threads[m1]->mtx, threads[m2]->mtx, nodes[rm1]->mtx, nodes[rm2]->mtx);
-
-                            if (my_thread.aborted)
-                                break;
-
-                            // Fák méretének ellenőrzése
-                            if (my_thread.tree_size < this->TREASHOLD)
-                            {
-                                my_thread.small_tree_count++;
-                            }
-                            else
-                            {
-                                my_thread.small_tree_count = 0;
-                            }
-
-                            if (threads[j]->small_tree_count < this->TREASHOLD)
-                            {
-                                threads[j]->small_tree_count++;
-                            }
-                            else
-                            {
-                                threads[j]->small_tree_count = 0;
-                            }
-
-                            // Ha még mindig fennállnak a feltételek
-                            if (dsu.find(u) == root_u && dsu.find(v) == root_v && nodes[root_v]->color == j && !threads[j]->aborted)
-                            {
-                                if (tid < j)
-                                {
-                                    // 1. Eset: Mi nyerünk, 'j' a vesztes
-                                    my_thread.mst_weight += w + threads[j]->mst_weight;
-                                    my_thread.pq.pop(); // Sikeres beolvasztás, az élt kivesszük
-                                    my_thread.tree_size += threads[j]->tree_size;
-                                    threads[j]->tree_size = 0;
-                                    merge_pqs(my_thread.pq, threads[j]->pq);
-                                    threads[j]->aborted = true;
-
-                                    nodes[root_v]->color = tid;
-                                    nodes[root_u]->color = tid;
-                                    dsu.unite(root_u, root_v);
-                                }
-                                else
-                                {
-                                    // 2. Eset: 'j' a nyertes, mi vagyunk a vesztes
-                                    threads[j]->mst_weight += w + my_thread.mst_weight;
-                                    my_thread.pq.pop(); // Átadjuk az élt, kivesszük a saját sorunkból
-                                    threads[j]->tree_size += my_thread.tree_size;
-                                    my_thread.tree_size = 0;
-                                    merge_pqs(threads[j]->pq, my_thread.pq);
-                                    my_thread.aborted = true;
-
-                                    nodes[root_u]->color = j;
-                                    nodes[root_v]->color = j;
-                                    dsu.unite(root_u, root_v);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            long long final_weight = 0;
-            for (int i = 0; i < num_threads; ++i)
-            {
-                if (!threads[i]->aborted && threads[i]->mst_weight > 0)
-                {
-                    final_weight = threads[i]->mst_weight;
-                    break;
-                }
-            }
-            return final_weight;
-        }
-
-        // --- BORUVKA ALGORITMUS ---
-        long long boruvkaMST()
+        long long solveStandard()
         {
             DSU dsu(V);
             int numTrees = V;
@@ -806,12 +302,12 @@ namespace minSpanningTree
                     }
                 }
                 if (!added)
-                    break; // Nem összefüggő gráf
+                    break;
             }
             return totalWeight;
         }
 
-        long long naivParallelBoruvkaMST()
+        long long solveNaivParallel()
         {
             ParallelDSU dsu(V);
             int numTrees = V;
@@ -819,7 +315,6 @@ namespace minSpanningTree
 
             while (numTrees > 1)
             {
-                // JAVÍTVA: -1 helyett INT_MAX, nehogy a 0-ás vagy negatív élsúlyok beakadjanak
                 vector<vector<int>> cheapest(V, vector<int>(3, INT_MAX));
 
 #pragma omp parallel for
@@ -873,7 +368,7 @@ namespace minSpanningTree
             return totalWeight;
         }
 
-        long long bufferedParallelBoruvkaMST()
+        long long solveBufferedParallel()
         {
             ParallelDSU dsu(V);
             long long totalWeight = 0;
@@ -942,7 +437,7 @@ namespace minSpanningTree
             return totalWeight;
         }
 
-        long long casParallelBoruvkaMST()
+        long long solveCasParallel()
         {
             ParallelDSU dsu(V);
             long long totalWeight = 0;
@@ -950,8 +445,6 @@ namespace minSpanningTree
 
             while (numTrees > 1)
             {
-                // Atomi élek: felső 32 bit a súly, alsó 32 bit az él indexe
-                // LLONG_MAX-szal inicializálunk (ez jelenti a -1-et)
                 vector<atomic<long long>> cheapest(V);
                 for (int i = 0; i < V; ++i)
                     cheapest[i].store(LLONG_MAX);
@@ -966,7 +459,6 @@ namespace minSpanningTree
                     {
                         long long new_val = ((long long)w << 32) | (i & 0xFFFFFFFFLL);
 
-                        // Atomi "update if smaller" logika (CAS) mindkét komponensre
                         for (int set : {set1, set2})
                         {
                             long long current = cheapest[set].load(memory_order_relaxed);
@@ -1011,23 +503,377 @@ namespace minSpanningTree
         }
     };
 
-    int test()
+    // =========================================================================
+    // 4. SETIA Prim SOLVER
+    // =========================================================================
+
+    using EdgeType = pair<int, pair<int, int>>;
+    using PairingHeap = pb::priority_queue<EdgeType, greater<EdgeType>, pb::pairing_heap_tag>;
+
+    struct ThreadData
     {
-        minSpanningTree::Graph g(4);
-        g.addEdge(0, 1, 10);
-        g.addEdge(0, 2, 6);
-        g.addEdge(0, 3, 5);
-        g.addEdge(1, 3, 15);
-        g.addEdge(2, 3, 4);
+        mutex mtx;
+        bool aborted = false;
+        long long mst_weight = 0;
+        PairingHeap pq;
+        int tree_size = 0;
+        int small_tree_count = 0;
+        int root_search_count = 0;
+    };
 
-        std::cout << "Kruskal cost: " << g.kruskalMST() << std::endl;
-        std::cout << "Prim Matrix cost: " << g.primMSTMatrix() << std::endl;
-        std::cout << "Prim Optimal cost: " << g.primMSTOptimal() << std::endl;
-        std::cout << "Boruvka cost: " << g.boruvkaMST() << std::endl;
-        std::cout << "Parallel Boruvka cost: " << g.naivParallelBoruvkaMST() << std::endl;
+    struct NodeData
+    {
+        mutex mtx;
+        int color = -1;
+    };
 
-        return 0;
-    }
+    class SetiaMSTSolver
+    {
+    private:
+        int V;
+        const vector<vector<pair<int, int>>> &adj;
+        int THRESHOLD;
+
+        vector<unique_ptr<ThreadData>> threads;
+        vector<unique_ptr<NodeData>> nodes;
+        unique_ptr<ParallelDSU> dsu;
+        atomic<int> uncolored_count;
+
+        void reset_state()
+        {
+            int num_threads = omp_get_max_threads();
+            threads.clear();
+            threads.resize(num_threads);
+            for (int i = 0; i < num_threads; ++i)
+                threads[i] = make_unique<ThreadData>();
+
+            nodes.clear();
+            nodes.resize(V);
+            for (int i = 0; i < V; ++i)
+                nodes[i] = make_unique<NodeData>();
+
+            dsu = make_unique<ParallelDSU>(V);
+            uncolored_count.store(V, memory_order_relaxed);
+        }
+
+        bool try_acquire_root(int root, int tid, bool is_heuristic)
+        {
+            int root_set = dsu->find(root);
+            lock_guard<mutex> lk(nodes[root_set]->mtx);
+            if (nodes[root_set]->color == -1)
+            {
+                nodes[root_set]->color = tid;
+                if (!is_heuristic)
+                    uncolored_count--;
+                return true;
+            }
+            return false;
+        }
+
+        void init_thread(int tid, int root)
+        {
+            auto &my_thread = *threads[tid];
+            lock_guard<mutex> lk(my_thread.mtx);
+            my_thread.aborted = false;
+            my_thread.mst_weight = 0;
+            my_thread.tree_size = 1;
+
+            my_thread.pq.clear();
+            for (auto &edge : adj[root])
+            {
+                my_thread.pq.push({edge.second, {root, edge.first}});
+            }
+        }
+
+        bool resolve_collision(int tid, int j, int u, int v, int w, int root_u, int root_v, bool is_heuristic)
+        {
+            auto &my_thread = *threads[tid];
+            int m1 = min(tid, j);
+            int m2 = max(tid, j);
+            int rm1 = min(root_u, root_v);
+            int rm2 = max(root_u, root_v);
+
+            scoped_lock lk(threads[m1]->mtx, threads[m2]->mtx, nodes[rm1]->mtx, nodes[rm2]->mtx);
+
+            if (my_thread.aborted)
+                return true;
+
+            if (is_heuristic)
+            {
+                my_thread.small_tree_count = (my_thread.tree_size < THRESHOLD) ? (my_thread.small_tree_count + 1) : 0;
+                threads[j]->small_tree_count = (threads[j]->tree_size < THRESHOLD) ? (threads[j]->small_tree_count + 1) : 0;
+            }
+
+            if (dsu->find(u) == root_u && dsu->find(v) == root_v && nodes[root_v]->color == j && !threads[j]->aborted)
+            {
+                if (tid < j)
+                {
+                    my_thread.mst_weight += w + threads[j]->mst_weight;
+                    my_thread.pq.pop();
+                    if (is_heuristic)
+                    {
+                        my_thread.tree_size += threads[j]->tree_size;
+                        threads[j]->tree_size = 0;
+                    }
+                    my_thread.pq.join(threads[j]->pq);
+                    threads[j]->aborted = true;
+
+                    nodes[root_v]->color = tid;
+                    nodes[root_u]->color = tid;
+                    dsu->unite(root_u, root_v);
+                    return false;
+                }
+                else
+                {
+                    threads[j]->mst_weight += w + my_thread.mst_weight;
+                    my_thread.pq.pop();
+                    if (is_heuristic)
+                    {
+                        threads[j]->tree_size += my_thread.tree_size;
+                        my_thread.tree_size = 0;
+                    }
+                    threads[j]->pq.join(my_thread.pq);
+                    my_thread.aborted = true;
+
+                    nodes[root_u]->color = j;
+                    nodes[root_v]->color = j;
+                    dsu->unite(root_u, root_v);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        void run_inner_prim(int tid, bool is_heuristic)
+        {
+            auto &my_thread = *threads[tid];
+
+            while (true)
+            {
+                EdgeType min_edge;
+                {
+                    lock_guard<mutex> lk(my_thread.mtx);
+                    if (my_thread.aborted || my_thread.pq.empty())
+                        break;
+                    min_edge = my_thread.pq.top();
+                }
+
+                int w = min_edge.first;
+                int u = min_edge.second.first;
+                int v = min_edge.second.second;
+
+                int root_u = dsu->find(u);
+                int root_v = dsu->find(v);
+
+                if (root_u == root_v)
+                {
+                    lock_guard<mutex> lk(my_thread.mtx);
+                    if (!my_thread.aborted)
+                        my_thread.pq.pop();
+                    continue;
+                }
+
+                int c = -2;
+                {
+                    scoped_lock lk(my_thread.mtx, nodes[root_v]->mtx);
+                    if (my_thread.aborted)
+                        break;
+                    if (dsu->find(v) != root_v)
+                        continue;
+
+                    c = nodes[root_v]->color;
+                    if (c == -1)
+                    {
+                        nodes[root_v]->color = tid;
+                        if (!is_heuristic)
+                            uncolored_count--;
+                        my_thread.mst_weight += w;
+                        my_thread.pq.pop();
+
+                        for (auto &edge : adj[v])
+                        {
+                            my_thread.pq.push({edge.second, {v, edge.first}});
+                        }
+                        if (is_heuristic)
+                            my_thread.tree_size++;
+                    }
+                }
+
+                if (c == -1)
+                {
+                    dsu->unite(root_u, root_v);
+                    continue;
+                }
+
+                if (c == tid)
+                {
+                    lock_guard<mutex> lk(my_thread.mtx);
+                    if (!my_thread.aborted)
+                        my_thread.pq.pop();
+                    continue;
+                }
+
+                bool aborted = resolve_collision(tid, c, u, v, w, root_u, root_v, is_heuristic);
+                if (aborted)
+                    break;
+            }
+        }
+
+        long long get_final_weight()
+        {
+            for (size_t i = 0; i < threads.size(); ++i)
+            {
+                if (!threads[i]->aborted && threads[i]->mst_weight > 0)
+                {
+                    return threads[i]->mst_weight;
+                }
+            }
+            return 0;
+        }
+
+    public:
+        SetiaMSTSolver(int V, const vector<vector<pair<int, int>>> &adj, int threshold)
+            : V(V), adj(adj), THRESHOLD(threshold) {}
+
+        long long solveStandard()
+        {
+            reset_state();
+
+#pragma omp parallel
+            {
+                int tid = omp_get_thread_num();
+                thread_local mt19937 gen(random_device{}() + tid);
+                uniform_int_distribution<int> dist(0, V - 1);
+
+                while (uncolored_count.load(memory_order_relaxed) > 0)
+                {
+                    int root = -1;
+                    for (int attempt = 0; attempt < 50; ++attempt)
+                    {
+                        int r = dist(gen);
+                        if (nodes[dsu->find(r)]->color == -1)
+                        {
+                            root = r;
+                            break;
+                        }
+                    }
+                    if (root == -1)
+                    {
+                        for (int i = 0; i < V; ++i)
+                        {
+                            if (nodes[dsu->find(i)]->color == -1)
+                            {
+                                root = i;
+                                break;
+                            }
+                        }
+                    }
+                    if (root == -1)
+                        break;
+
+                    if (!try_acquire_root(root, tid, false))
+                        continue;
+
+                    init_thread(tid, root);
+                    run_inner_prim(tid, false);
+                }
+            }
+            return get_final_weight();
+        }
+
+        long long solveHeuristic()
+        {
+            reset_state();
+
+#pragma omp parallel
+            {
+                int tid = omp_get_thread_num();
+                auto &my_thread = *threads[tid];
+                thread_local mt19937 gen(random_device{}() + tid);
+                uniform_int_distribution<int> dist(0, V - 1);
+
+                while (my_thread.small_tree_count < THRESHOLD && my_thread.root_search_count < THRESHOLD)
+                {
+                    int root = -1;
+                    int r = dist(gen);
+                    int r_set = dsu->find(r);
+
+                    if (nodes[r_set]->color == -1)
+                    {
+                        root = r;
+                        my_thread.root_search_count = 0;
+                    }
+                    else
+                    {
+                        my_thread.root_search_count++;
+                        continue;
+                    }
+
+                    if (!try_acquire_root(root, tid, true))
+                        continue;
+
+                    init_thread(tid, root);
+                    run_inner_prim(tid, true);
+                }
+            }
+            return get_final_weight();
+        }
+    };
+
+    // =========================================================================
+    // GRAPH OSZTÁLY
+    // =========================================================================
+
+    class Graph
+    {
+    private:
+        int V;
+        vector<vector<int>> edges;
+        vector<vector<pair<int, int>>> adj;
+        vector<vector<int>> matrix;
+
+        const int TREASHOLD = 100;
+
+    public:
+        Graph(int vertices) : V(vertices)
+        {
+            adj.resize(V);
+            if (V < 10000)
+            {
+                matrix.resize(V, vector<int>(V, 0));
+            }
+        }
+
+        void addEdge(int u, int v, int w)
+        {
+            edges.push_back({u, v, w});
+            adj[u].push_back({v, w});
+            adj[v].push_back({u, w});
+            if (V < 10000)
+            {
+                matrix[u][v] = w;
+                matrix[v][u] = w;
+            }
+        }
+
+        // Tiszta API delegálások a Solver osztályok felé
+        long long kruskalMST() { return KruskalSolver(V, edges).solve(); }
+
+        long long primMSTMatrix() { return PrimSolver(V, adj, matrix).solveMatrix(); }
+        long long primMSTOptimal() { return PrimSolver(V, adj, matrix).solveList(); }
+
+        long long parallelPrimSetiaMST() { return SetiaMSTSolver(V, adj, TREASHOLD).solveStandard(); }
+        long long parallelPrimHeuristicSetiaMST() { return SetiaMSTSolver(V, adj, TREASHOLD).solveHeuristic(); }
+
+        long long boruvkaMST() { return BoruvkaSolver(V, edges).solveStandard(); }
+        long long naivParallelBoruvkaMST() { return BoruvkaSolver(V, edges).solveNaivParallel(); }
+        long long bufferedParallelBoruvkaMST() { return BoruvkaSolver(V, edges).solveBufferedParallel(); }
+        long long casParallelBoruvkaMST() { return BoruvkaSolver(V, edges).solveCasParallel(); }
+    };
+
+    // =========================================================================
+    // TESZTELÉS ÉS ADMINISZTRÁCIÓ
+    // =========================================================================
 
     namespace fs = std::filesystem;
 
@@ -1038,10 +884,9 @@ namespace minSpanningTree
         return ts.tv_sec + ts.tv_nsec / 1e9;
     }
 
-    pair<int, vector<array<int, 3>>> read_MST_test(const string &file_name)
+    pair<int, vector<array<int, 3>>> read_MST_test(const string &file_name, const string &input_dir)
     {
-        // vagy megtartjuk az eredeti relatív útvonalat.
-        ifstream file("../test_input/spanning_tree_test/" + file_name);
+        ifstream file(input_dir + file_name);
         if (!file.is_open())
         {
             cerr << "Error: Could not open file " << file_name << endl;
@@ -1084,9 +929,9 @@ namespace minSpanningTree
 
     void measureAllMSTAlgorithms(string folder_name, int execution_count, int timeout_sec)
     {
-        string input_dir = "../test_input/spanning_tree_test/";
+        string input_dir = "../test_input/" + folder_name + "/";
+        string output_dir = "../test_data/mst/" + folder_name + "/";
 
-        // 1. CSAK A FÁJLNEVEK beolvasása (Memóriatakarékos!)
         vector<string> test_files;
         if (!fs::exists(input_dir))
         {
@@ -1109,11 +954,8 @@ namespace minSpanningTree
             return;
         }
 
-        // Fájlnevek sorbarendezése.
-        // A "01.in", "02.in", "10.in" formátum miatt a sima ABC sorrend (lexikografikus) tökéletesen működik.
         sort(test_files.begin(), test_files.end());
 
-        // 2. Algoritmusok regisztrálása
         struct AlgDef
         {
             string name;
@@ -1121,27 +963,25 @@ namespace minSpanningTree
         };
 
         vector<AlgDef> algorithms = {
-            // {"Kruskal", [](Graph &g)
-            //  { return g.kruskalMST(); }},
-            // {"Prim Matrix", [](Graph &g)
-            //  { return g.primMSTMatrix(); }},
-            // {"Prim List", [](Graph &g)
-            //  { return g.primMSTOptimal(); }},
+            {"Kruskal", [](Graph &g)
+             { return g.kruskalMST(); }},
+            {"Prim Matrix", [](Graph &g)
+             { return g.primMSTMatrix(); }},
+            {"Prim List", [](Graph &g)
+             { return g.primMSTOptimal(); }},
             {"Parallel Prim", [](Graph &g)
              { return g.parallelPrimSetiaMST(); }},
-             {"Parallel Prim Heuristic", [](Graph &g)
+            {"Parallel Prim Heuristic", [](Graph &g)
              { return g.parallelPrimHeuristicSetiaMST(); }},
-            // {"Boruvka", [](Graph &g)
-            //  { return g.boruvkaMST(); }},
-            // {"Naiv Parallel Boruvka", [](Graph &g)
-            //  { return g.naivParallelBoruvkaMST(); }},
-            // {"Buffered Parallel Boruvka", [](Graph &g)
-            //  { return g.bufferedParallelBoruvkaMST(); }},
-            // {"CAS Parallel Boruvka", [](Graph &g)
-            //  { return g.casParallelBoruvkaMST(); }}
-        };
+            {"Boruvka", [](Graph &g)
+             { return g.boruvkaMST(); }},
+            {"Naiv Parallel Boruvka", [](Graph &g)
+             { return g.naivParallelBoruvkaMST(); }},
+            {"Buffered Parallel Boruvka", [](Graph &g)
+             { return g.bufferedParallelBoruvkaMST(); }},
+            {"CAS Parallel Boruvka", [](Graph &g)
+             { return g.casParallelBoruvkaMST(); }}};
 
-        // 3. Adminisztrációs és CSV változók előkészítése
         map<string, ofstream> alg_files;
         map<string, double> total_wall_time;
         map<string, double> total_cpu_time;
@@ -1150,9 +990,6 @@ namespace minSpanningTree
         map<string, string> final_status;
         set<string> timed_out_algorithms;
 
-        string output_dir = "../test_data/mst/";
-        if (folder_name != "")
-            output_dir += folder_name + "/";
         fs::create_directories(output_dir);
 
         for (const auto &alg : algorithms)
@@ -1177,11 +1014,9 @@ namespace minSpanningTree
         auto benchmark_start = chrono::high_resolution_clock::now();
         cout << "\n[INFO] MST Benchmarking started..." << endl;
 
-        // 4. Fő tesztelési ciklus (LAZY LOADING - Csak azt a fájlt töltjük be, amelyiket épp teszteljük)
         for (const string &current_filename : test_files)
         {
-            // --- GRÁF BEOLVASÁSA A MEMÓRIÁBA ---
-            auto graph_info = read_MST_test(current_filename);
+            auto graph_info = read_MST_test(current_filename, input_dir);
             int current_V = graph_info.first;
             const auto &current_edges = graph_info.second;
             int current_E = current_edges.size();
@@ -1189,12 +1024,11 @@ namespace minSpanningTree
             if (current_V == 0)
             {
                 cerr << "[Hiba] Nem sikerult beolvasni vagy ures a fajl: " << current_filename << endl;
-                continue; // Hibás fájl ugrása
+                continue;
             }
 
             cout << "\n--- Teszteles: " << current_filename << " (V: " << current_V << ", E: " << current_E << ") ---" << endl;
 
-            // Alap referencia gráf a helyesség (Cost) ellenőrzéséhez
             Graph base_graph(current_V);
             for (const auto &edge : current_edges)
             {
@@ -1215,7 +1049,6 @@ namespace minSpanningTree
                     continue;
                 }
 
-                // Explicit védelem a Prim Mátrix ellen óriási gráfoknál
                 if (name == "Prim Matrix" && current_V > 10000)
                 {
                     timed_out_algorithms.insert(name);
@@ -1232,7 +1065,6 @@ namespace minSpanningTree
 
                 for (int i = 0; i < execution_count; ++i)
                 {
-                    // Új gráf építése a memóriában már ott lévő él-listából
                     Graph g(current_V);
                     for (const auto &edge : current_edges)
                     {
@@ -1242,7 +1074,6 @@ namespace minSpanningTree
                     auto wall_start = chrono::high_resolution_clock::now();
                     double cpu_start = get_cpu_time_seconds();
 
-                    // KÖZVETLEN (Szinkron) futtatás
                     long long result_cost = alg.func(g);
 
                     double cpu_end = get_cpu_time_seconds();
@@ -1299,12 +1130,8 @@ namespace minSpanningTree
                     files_processed_count[name]++;
                 }
             }
-
-            // Itt ér véget a 'current_filename' ciklusa.
-            // A graph_info, current_edges, base_graph megsemmisülnek, és a lefoglalt RAM felszabadul!
         }
 
-        // --- TERMINÁL ÖSSZEFOGLALÓ JELENTÉS ---
         auto benchmark_end = chrono::high_resolution_clock::now();
         double benchmark_duration = chrono::duration<double>(benchmark_end - benchmark_start).count();
 

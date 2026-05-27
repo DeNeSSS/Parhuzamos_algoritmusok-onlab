@@ -1,3 +1,0 @@
-File,Vertices,Edges,Wall_Avg_s,CPU_Work_s,Wall_Fast_s,Wall_Slow_s,Status
-01.in,10,20,0.004293,0.005620,0.004293,0.004293,SUCCESS
-custom_test.in,10000,250000,1.227961,8.207244,1.227961,1.227961,SUCCESS

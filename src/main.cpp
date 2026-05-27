@@ -27,5 +27,7 @@ int main()
 
     // sorting::measureSortingAlgorithms(1000000, 3, 5);
 
-    minSpanningTree::measureAllMSTAlgorithms();
+    minSpanningTree::measureAllMSTAlgorithms("sparse");
+    minSpanningTree::measureAllMSTAlgorithms("dense");
+
 }
