@@ -17,6 +17,7 @@
 #include <thread>
 #include <tuple>
 #include <vector>
+#include <random>
 
 #include "minSpanningTree.h"
 
@@ -138,7 +139,7 @@ namespace minSpanningTree
         // 3. Szomszédsági mátrix - Klasszikus Prim számára
         vector<vector<int>> matrix;
 
-        const int TRY_TREASHOLD = 100;
+        const int TREASHOLD = 100;
 
     public:
         Graph(int vertices) : V(vertices)
@@ -258,7 +259,6 @@ namespace minSpanningTree
         {
             int num_threads = omp_get_max_threads();
 
-            // Szálak állapotát leíró struktúra
             struct ThreadData
             {
                 mutex mtx;
@@ -269,7 +269,6 @@ namespace minSpanningTree
                                greater<>>
                     pq;
             };
-
             vector<unique_ptr<ThreadData>> threads(num_threads);
             for (int i = 0; i < num_threads; ++i)
                 threads[i] = make_unique<ThreadData>();
@@ -300,6 +299,10 @@ namespace minSpanningTree
                 int tid = omp_get_thread_num();
                 auto &my_thread = *threads[tid];
 
+                // Thread-local véletlenszám-generátor: minden szálnak saját, lock-mentes példánya van
+                thread_local std::mt19937 gen(std::random_device{}() + tid);
+                std::uniform_int_distribution<int> dist(0, V - 1);
+
                 while (uncolored_count.load(memory_order_relaxed) > 0)
                 {
                     int root = -1;
@@ -307,7 +310,7 @@ namespace minSpanningTree
                     // 1. Heurisztika: Véletlenszerű uncolored gyökér keresése (Wrap-around find-Min helyettesítője)
                     for (int attempt = 0; attempt < 50; ++attempt)
                     {
-                        int r = rand() % V;
+                        int r = dist(gen);
                         int r_set = dsu.find(r);
                         if (nodes[r_set]->color == -1)
                         {
@@ -345,7 +348,6 @@ namespace minSpanningTree
                             root_acquired = true;
                         }
                     }
-
                     if (!root_acquired)
                     {
                         continue;
@@ -367,129 +369,127 @@ namespace minSpanningTree
                     }
 
                     // 4. Belső Prim iteráció (MinNode keresés és fa növelés)
+                    // 4. Belső Prim iteráció (MinNode keresés és fa növelés)
                     while (true)
                     {
                         pair<int, pair<int, int>> min_edge;
                         {
                             lock_guard<mutex> lk(my_thread.mtx);
-                            if (my_thread.aborted)
-                                break; // Valaki beolvasztott minket
-                            if (my_thread.pq.empty())
-                                break; // Kész a fa
+                            // 1. LÉPÉS: Csak megnézzük az élt (PEEK), de NEM vesszük ki!
+                            if (my_thread.aborted || my_thread.pq.empty())
+                                break;
                             min_edge = my_thread.pq.top();
-                            my_thread.pq.pop();
                         }
 
                         int w = min_edge.first;
                         int u = min_edge.second.first;
                         int v = min_edge.second.second;
 
-                        int setidx = dsu.find(v);
-                        int c = -2;
+                        int root_u = dsu.find(u);
+                        int root_v = dsu.find(v);
 
-                        // Megnézzük a talált csúcs aktuális színét
+                        // Ha az él két végpontja már egy fában van (belső él)
+                        if (root_u == root_v)
                         {
-                            lock_guard<mutex> lk(nodes[setidx]->mtx);
-                            c = nodes[setidx]->color;
-                            if (c == -1)
-                            {
-                                nodes[setidx]->color = tid;
-                                uncolored_count--;
-                            }
+                            lock_guard<mutex> lk(my_thread.mtx);
+                            if (!my_thread.aborted)
+                                my_thread.pq.pop(); // Eldobjuk
+                            continue;
                         }
 
-                        if (c == -1)
+                        int c = -2;
                         {
-                            // A) Sima Prim: uncolored csúcs hozzáadása
+                            // Egyszerre lockoljuk a szálat és a célpont gyökerét
+                            scoped_lock lk(my_thread.mtx, nodes[root_v]->mtx);
+
+                            if (my_thread.aborted)
+                                break;
+
+                            // Leellenőrizzük, hogy root_v még mindig gyökér-e
+                            if (dsu.find(v) != root_v)
+                                continue; // Megváltozott! Hagyjuk a sorban az élt és újrapróbáljuk.
+
+                            c = nodes[root_v]->color;
+                            if (c == -1)
                             {
-                                lock_guard<mutex> lk(my_thread.mtx);
+                                // Sikeresen elfoglaltunk egy új csúcsot
+                                nodes[root_v]->color = tid;
+                                uncolored_count--;
                                 my_thread.mst_weight += w;
+
+                                // FELHASZNÁLTUK AZ ÉLT, MOST VESSZÜK KI A SORBÓL!
+                                my_thread.pq.pop();
+
                                 for (auto &edge : adj[v])
                                 {
                                     my_thread.pq.push({edge.second, {v, edge.first}});
                                 }
                             }
-                            dsu.unite(dsu.find(u), setidx);
-
-                            // Új root biztosítása a saját színünkkel
-                            int new_root = dsu.find(setidx);
-                            if (new_root != setidx)
-                            {
-                                lock_guard<mutex> lk(nodes[new_root]->mtx);
-                                nodes[new_root]->color = tid;
-                            }
                         }
-                        else if (c != tid)
+
+                        if (c == -1)
                         {
-                            // B) ÜTKÖZÉS EGY MÁSIK SZÁLLAL! -> MergeTree művelet
-                            int j = c;
-                            int m1 = min(tid, j);
-                            int m2 = max(tid, j);
+                            // Lockok nélkül egyesítjük a két fát
+                            dsu.unite(root_u, root_v);
+                            continue;
+                        }
 
-                            int root_u = dsu.find(u);
-                            int root_v = setidx;
+                        if (c == tid)
+                        {
+                            // Közben a mi fánk része lett egy másik ágon
+                            lock_guard<mutex> lk(my_thread.mtx);
+                            if (!my_thread.aborted)
+                                my_thread.pq.pop(); // Eldobjuk
+                            continue;
+                        }
 
-                            if (root_u == root_v)
-                                continue; // Belső éllé vált
+                        // B) ÜTKÖZÉS EGY MÁSIK SZÁLLAL!
+                        int j = c;
+                        int m1 = min(tid, j);
+                        int m2 = max(tid, j);
 
-                            int rm1 = min(root_u, root_v);
-                            int rm2 = max(root_u, root_v);
+                        int rm1 = min(root_u, root_v);
+                        int rm2 = max(root_u, root_v);
 
-                            bool pushed_back = false;
+                        {
+                            // 4 Mutex egyidejű, holtpontmentes lockolása
+                            scoped_lock lk(threads[m1]->mtx, threads[m2]->mtx, nodes[rm1]->mtx, nodes[rm2]->mtx);
 
-                            // DEADLOCK VÉDELEM
+                            if (my_thread.aborted)
+                                break;
+
+                            // Ha még mindig fennállnak a feltételek
+                            if (dsu.find(u) == root_u && dsu.find(v) == root_v && nodes[root_v]->color == j && !threads[j]->aborted)
                             {
-                                scoped_lock lk(threads[m1]->mtx, threads[m2]->mtx, nodes[rm1]->mtx, nodes[rm2]->mtx);
-
-                                // JAVÍTÁS 1: Ellenőrizzük, hogy a gyökerek nem változtak-e a lockolás közben!
-                                if (dsu.find(u) != root_u || dsu.find(v) != root_v)
+                                if (tid < j)
                                 {
-                                    pushed_back = true;
-                                }
-                                else if (nodes[root_v]->color == j && !my_thread.aborted && !threads[j]->aborted)
-                                {
-                                    if (tid < j)
-                                    {
-                                        // 1. Eset: Mi nyerünk, 'j' a vesztes
-                                        my_thread.mst_weight += w + threads[j]->mst_weight;
-                                        // my_thread.small_tree_count = 0; // (Ha a heurisztikus verziót használod, ezt tedd be!)
-                                        merge_pqs(my_thread.pq, threads[j]->pq);
-                                        threads[j]->aborted = true;
+                                    // 1. Eset: Mi nyerünk, 'j' a vesztes
+                                    my_thread.mst_weight += w + threads[j]->mst_weight;
+                                    my_thread.pq.pop(); // Sikeres beolvasztás, az élt kivesszük
+                                    merge_pqs(my_thread.pq, threads[j]->pq);
+                                    threads[j]->aborted = true;
 
-                                        // A vesztes gyökerét a nyertes színére festjük!
-                                        nodes[root_v]->color = tid;
-                                        nodes[root_u]->color = tid;
-                                        dsu.unite(root_u, root_v);
-                                    }
-                                    else
-                                    {
-                                        // 2. Eset: 'j' a nyertes, mi vagyunk a vesztes
-                                        threads[j]->mst_weight += w + my_thread.mst_weight;
-                                        // my_thread.small_tree_count++; // (Ha a heurisztikus verziót használod, ezt tedd be!)
-                                        merge_pqs(threads[j]->pq, my_thread.pq);
-                                        my_thread.aborted = true;
-
-                                        // A vesztes gyökerét a nyertes színére festjük!
-                                        nodes[root_u]->color = j;
-                                        nodes[root_v]->color = j;
-                                        dsu.unite(root_u, root_v);
-                                    }
+                                    nodes[root_v]->color = tid;
+                                    nodes[root_u]->color = tid;
+                                    dsu.unite(root_u, root_v);
                                 }
                                 else
                                 {
-                                    // Ha a szál meghalt közben, újra kell próbálni ezt az élt!
-                                    pushed_back = true;
-                                }
-                            } // Scoped lock vége
+                                    // 2. Eset: 'j' a nyertes, mi vagyunk a vesztes
+                                    threads[j]->mst_weight += w + my_thread.mst_weight;
+                                    my_thread.pq.pop(); // Átadjuk az élt, kivesszük a saját sorunkból
+                                    merge_pqs(threads[j]->pq, my_thread.pq);
+                                    my_thread.aborted = true;
 
-                            // JAVÍTÁS 2: Ha a feltételek nem stimmeltek, az élt visszatesszük a sorba!
-                            if (pushed_back)
-                            {
-                                lock_guard<mutex> lk(my_thread.mtx);
-                                my_thread.pq.push({w, {u, v}});
+                                    nodes[root_u]->color = j;
+                                    nodes[root_v]->color = j;
+                                    dsu.unite(root_u, root_v);
+                                    break;
+                                }
                             }
-                            if (my_thread.aborted)
-                                break; // Kilépés, új rootot keresünk
+                            // Ha a feltételek elromlottak (pl. 'j' közben meghalt),
+                            // a szál békésen továbblép. Mivel NEM hívtunk pop()-ot,
+                            // az él biztonságban vár a pq tetején a következő ciklusra!
                         }
                     }
                 }
@@ -507,24 +507,23 @@ namespace minSpanningTree
             return final_weight;
         }
 
-        // --- SETIA ET AL. PARALLEL PRIM ALGORITMUS heurisztikával kiegészítve ---
-        long long parallelPrimSetiaWithHeuristicMST()
+        long long parallelPrimHeuristicSetiaMST()
         {
             int num_threads = omp_get_max_threads();
 
-            // Szálak állapotát leíró struktúra
             struct ThreadData
             {
                 mutex mtx;
                 bool aborted = false;
                 long long mst_weight = 0;
                 priority_queue<pair<int, pair<int, int>>,
-                               vector<pair<int, pair<int, int>>>, greater<>>
+                               vector<pair<int, pair<int, int>>>,
+                               greater<>>
                     pq;
+                int tree_size = 0;
                 int small_tree_count = 0;
                 int root_search_count = 0;
             };
-
             vector<unique_ptr<ThreadData>> threads(num_threads);
             for (int i = 0; i < num_threads; ++i)
                 threads[i] = make_unique<ThreadData>();
@@ -554,11 +553,16 @@ namespace minSpanningTree
                 int tid = omp_get_thread_num();
                 auto &my_thread = *threads[tid];
 
-                while (my_thread.small_tree_count < this->TRY_TREASHOLD &&
-                       my_thread.root_search_count < this->TRY_TREASHOLD)
+                // Thread-local véletlenszám-generátor: minden szálnak saját, lock-mentes példánya van
+                thread_local std::mt19937 gen(std::random_device{}() + tid);
+                std::uniform_int_distribution<int> dist(0, V - 1);
+
+                while (my_thread.small_tree_count < this->TREASHOLD &&
+                       my_thread.root_search_count < this->TREASHOLD)
                 {
+                    // 1. Gyökér keresése
                     int root = -1;
-                    int r = rand() % V;
+                    int r = dist(gen);
                     int r_set = dsu.find(r);
                     if (nodes[r_set]->color == -1)
                     {
@@ -582,7 +586,6 @@ namespace minSpanningTree
                             root_acquired = true;
                         }
                     }
-
                     if (!root_acquired)
                     {
                         continue;
@@ -609,98 +612,143 @@ namespace minSpanningTree
                         pair<int, pair<int, int>> min_edge;
                         {
                             lock_guard<mutex> lk(my_thread.mtx);
-                            if (my_thread.aborted)
-                                break; // Valaki beolvasztott minket
-                            if (my_thread.pq.empty())
-                                break; // Kész a fa
+                            // 1. LÉPÉS: Csak megnézzük az élt (PEEK), de NEM vesszük ki!
+                            if (my_thread.aborted || my_thread.pq.empty())
+                                break;
                             min_edge = my_thread.pq.top();
-                            my_thread.pq.pop();
                         }
 
                         int w = min_edge.first;
                         int u = min_edge.second.first;
                         int v = min_edge.second.second;
 
-                        int setidx = dsu.find(v);
-                        int c = -2;
+                        int root_u = dsu.find(u);
+                        int root_v = dsu.find(v);
 
-                        // Megnézzük a talált csúcs aktuális színét
+                        // Ha az él két végpontja már egy fában van (belső él)
+                        if (root_u == root_v)
                         {
-                            lock_guard<mutex> lk(nodes[setidx]->mtx);
-                            c = nodes[setidx]->color;
+                            lock_guard<mutex> lk(my_thread.mtx);
+                            if (!my_thread.aborted)
+                                my_thread.pq.pop(); // Eldobjuk
+                            continue;
+                        }
+
+                        int c = -2;
+                        {
+                            // Egyszerre lockoljuk a szálat és a célpont gyökerét
+                            scoped_lock lk(my_thread.mtx, nodes[root_v]->mtx);
+
+                            if (my_thread.aborted)
+                                break;
+
+                            // Leellenőrizzük, hogy root_v még mindig gyökér-e
+                            if (dsu.find(v) != root_v)
+                                continue; // Megváltozott! Hagyjuk a sorban az élt és újrapróbáljuk.
+
+                            c = nodes[root_v]->color;
                             if (c == -1)
                             {
-                                nodes[setidx]->color = tid;
+                                // Sikeresen elfoglaltunk egy új csúcsot
+                                nodes[root_v]->color = tid;
+                                my_thread.mst_weight += w;
+
+                                // FELHASZNÁLTUK AZ ÉLT, MOST VESSZÜK KI A SORBÓL!
+                                my_thread.pq.pop();
+
+                                for (auto &edge : adj[v])
+                                {
+                                    my_thread.pq.push({edge.second, {v, edge.first}});
+                                }
+
+                                my_thread.tree_size++;
                             }
                         }
 
                         if (c == -1)
                         {
-                            // A) Sima Prim: uncolored csúcs hozzáadása
-                            {
-                                lock_guard<mutex> lk(my_thread.mtx);
-                                my_thread.mst_weight += w;
-                                for (auto &edge : adj[v])
-                                {
-                                    my_thread.pq.push({edge.second, {v, edge.first}});
-                                }
-                            }
-                            dsu.unite(dsu.find(u), setidx);
-
-                            // Új root biztosítása a saját színünkkel
-                            int new_root = dsu.find(setidx);
-                            if (new_root != setidx)
-                            {
-                                lock_guard<mutex> lk(nodes[new_root]->mtx);
-                                nodes[new_root]->color = tid;
-                            }
+                            // Lockok nélkül egyesítjük a két fát
+                            dsu.unite(root_u, root_v);
+                            continue;
                         }
-                        else if (c != tid)
+
+                        if (c == tid)
                         {
-                            // B) ÜTKÖZÉS EGY MÁSIK SZÁLLAL! -> MergeTree művelet
-                            int j = c;
-                            int m1 = min(tid, j);
-                            int m2 = max(tid, j);
+                            // Közben a mi fánk része lett egy másik ágon
+                            lock_guard<mutex> lk(my_thread.mtx);
+                            if (!my_thread.aborted)
+                                my_thread.pq.pop(); // Eldobjuk
+                            continue;
+                        }
 
-                            // DEADLOCK VÉDELEM: Mindhárom lockot egyszerre, rendezetten kérjük el (C++17)
-                            scoped_lock lk(threads[m1]->mtx, threads[m2]->mtx, nodes[setidx]->mtx);
+                        // B) ÜTKÖZÉS EGY MÁSIK SZÁLLAL!
+                        int j = c;
+                        int m1 = min(tid, j);
+                        int m2 = max(tid, j);
 
-                            // Ellenőrizzük, hogy a feltételek nem változtak-e a lockolás közben
-                            if (nodes[setidx]->color == j && !my_thread.aborted && !threads[j]->aborted)
+                        int rm1 = min(root_u, root_v);
+                        int rm2 = max(root_u, root_v);
+
+                        {
+                            // 4 Mutex egyidejű, holtpontmentes lockolása
+                            scoped_lock lk(threads[m1]->mtx, threads[m2]->mtx, nodes[rm1]->mtx, nodes[rm2]->mtx);
+
+                            if (my_thread.aborted)
+                                break;
+
+                            // Fák méretének ellenőrzése
+                            if (my_thread.tree_size < this->TREASHOLD)
+                            {
+                                my_thread.small_tree_count++;
+                            }
+                            else
+                            {
+                                my_thread.small_tree_count = 0;
+                            }
+
+                            if (threads[j]->small_tree_count < this->TREASHOLD)
+                            {
+                                threads[j]->small_tree_count++;
+                            }
+                            else
+                            {
+                                threads[j]->small_tree_count = 0;
+                            }
+
+                            // Ha még mindig fennállnak a feltételek
+                            if (dsu.find(u) == root_u && dsu.find(v) == root_v && nodes[root_v]->color == j && !threads[j]->aborted)
                             {
                                 if (tid < j)
                                 {
-                                    // 1. Eset: A mi ID-nk a kisebb -> 'j'-t beolvasztjuk magunkba
+                                    // 1. Eset: Mi nyerünk, 'j' a vesztes
                                     my_thread.mst_weight += w + threads[j]->mst_weight;
-                                    my_thread.small_tree_count = 0;
+                                    my_thread.pq.pop(); // Sikeres beolvasztás, az élt kivesszük
+                                    my_thread.tree_size += threads[j]->tree_size;
+                                    threads[j]->tree_size = 0;
                                     merge_pqs(my_thread.pq, threads[j]->pq);
-                                    threads[j]->aborted = true; // 'j' szál "újraindítása"
-                                    nodes[setidx]->color = tid;
-                                    dsu.unite(dsu.find(u), setidx);
+                                    threads[j]->aborted = true;
 
-                                    int new_root = dsu.find(setidx);
-                                    if (new_root != setidx)
-                                        nodes[new_root]->color = tid;
+                                    nodes[root_v]->color = tid;
+                                    nodes[root_u]->color = tid;
+                                    dsu.unite(root_u, root_v);
                                 }
                                 else
                                 {
-                                    // 2. Eset: 'j' ID-ja a kisebb -> Minket olvasztanak be 'j'-be
+                                    // 2. Eset: 'j' a nyertes, mi vagyunk a vesztes
                                     threads[j]->mst_weight += w + my_thread.mst_weight;
-                                    my_thread.small_tree_count++;
+                                    my_thread.pq.pop(); // Átadjuk az élt, kivesszük a saját sorunkból
+                                    threads[j]->tree_size += my_thread.tree_size;
+                                    my_thread.tree_size = 0;
                                     merge_pqs(threads[j]->pq, my_thread.pq);
-                                    my_thread.aborted = true; // Saját magunk "újraindítása"
-                                    nodes[setidx]->color = j;
-                                    dsu.unite(dsu.find(u), setidx);
+                                    my_thread.aborted = true;
 
-                                    int new_root = dsu.find(setidx);
-                                    if (new_root != setidx)
-                                        nodes[new_root]->color = j;
-
-                                    break; // Kilépés a while ciklusból, külső ciklusban új rootot keresünk
+                                    nodes[root_u]->color = j;
+                                    nodes[root_v]->color = j;
+                                    dsu.unite(root_u, root_v);
+                                    break;
                                 }
                             }
                         }
-                        // C) Ha c == tid, a csúcs már a mi fánk része, simán átugorjuk (belső él).
                     }
                 }
             }
@@ -1081,6 +1129,8 @@ namespace minSpanningTree
             //  { return g.primMSTOptimal(); }},
             {"Parallel Prim", [](Graph &g)
              { return g.parallelPrimSetiaMST(); }},
+             {"Parallel Prim Heuristic", [](Graph &g)
+             { return g.parallelPrimHeuristicSetiaMST(); }},
             // {"Boruvka", [](Graph &g)
             //  { return g.boruvkaMST(); }},
             // {"Naiv Parallel Boruvka", [](Graph &g)
