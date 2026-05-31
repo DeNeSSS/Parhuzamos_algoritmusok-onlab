@@ -18,7 +18,7 @@ int main()
     auto powerOfTwo = [](int current)
     { return current * 2; };
 
-    // minSearch::measureMinSearchAlgorithms(100000, 10000000, linear, "change", 5, 5);
+    minSearch::measureMinSearchAlgorithms(100000, 10000000, linear, "change2", 3, 5);
     // minSearch::measureMinSearchAlgorithms(100000, 100000000, exponental, "full", 5, 5);
     // minSearch::measureMinSearchAlgorithms(100000, 100000, exponental, "test", 3, 5);
 
@@ -27,7 +27,6 @@ int main()
 
     // sorting::measureSortingAlgorithms(1000000, 3, 5);
 
-    minSpanningTree::measureAllMSTAlgorithms("sparse");
-    minSpanningTree::measureAllMSTAlgorithms("dense");
-
+    // minSpanningTree::measureAllMSTAlgorithms("sparse");
+    // minSpanningTree::measureAllMSTAlgorithms("dense");
 }

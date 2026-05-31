@@ -1,3 +1,4 @@
+# Rendező algoritmusok
 ## Feladat leírása
 
 Egy $n$ elemű tömb elemeinek növekvő sorrendbe történő rendezése $k$ párhuzamos szál (vagy egy szál) használatával. A feladat során különböző rendezési stratégiákat – klasszikus iteratív, oszd-meg-és-uralkodj, valamint rendező hálózat alapú algoritmusokat – implementálunk és párhuzamosítunk.
@@ -21,7 +22,7 @@ Egy $n$ elemű tömb elemeinek növekvő sorrendbe történő rendezése $k$ pá
     
     - _Leírás:_ Az egyes fázisokon belül az összehasonlítások teljesen függetlenek egymástól, így ezeket OpenMP `#pragma omp for` direktívával szétosztjuk a szálak között.
         
-    - _Tervezői döntések:_ Mivel az algoritmus in-place működik, nincs memóriafoglalási overhead. Bár tökéletesen párhuzamosítható a belső ciklus, a nagyságrendi összes elvégzett munka $O(\frac{n^2}{k})$ marad, ami miatt skálázhatósága nagy adathalmazokon alacsony.
+    - _Tervezői döntések:_ Mivel az algoritmus in-place működik, nincs memóriafoglalási overhead. Bár tökéletesen párhuzamosítható a belső ciklus, a nagyságrendi összes elvégzett munka $O(n^2)$ marad, ami miatt skálázhatósága nagy adathalmazokon alacsony.
     - *Tapasztalatok*: Elég lassú és rosszul skálázódik, mivel a processzorok száma konstans ezért nagy inputok esetén elhanyagolható lesz a változás
         
 
@@ -30,7 +31,6 @@ Egy $n$ elemű tömb elemeinek növekvő sorrendbe történő rendezése $k$ pá
 - **Komplexitás:** 
 	- Idő: $O(n \log n)$ (átlagos), $O(n^2)$ (legrosszabb). Hely: $O(\log n)$ (a rekurziós verem miatt).
 	- Párhuzamos idő: $O(n\frac{\log n}{k} + n)$
-	- 
     
 - **Leírás:** Oszd-meg-és-uralkodj (Divide and Conquer) alapú algoritmus. Kiválaszt egy pivot elemet, a nála kisebbeket balra, a nagyobbakat jobbra rendezi (particionálás), majd a két létrejött részre rekurzívan meghívja önmagát.
     
@@ -67,7 +67,7 @@ Egy $n$ elemű tömb elemeinek növekvő sorrendbe történő rendezése $k$ pá
         
     - _Tervezői döntések:_
         
-        - **$O(1)$ dinamikus memóriafoglalás a futás alatt:** Az összefésüléshez szükséges átmeneti tömb (`temp`) csupán egyszer, a rendezés legelső lépése előtt kerül lefoglalásra, majd referenciaként passzolódik a rekurzióban. Ez drasztikusan csökkenti a memóriakezelési időt.
+        - **$O(1)$ dinamikus memóriafoglalás a futás alatt:** Az összefésüléshez szükséges átmeneti tömb (`temp`) csupán egyszer, a rendezés legelső lépése előtt kerül lefoglalásra, majd referenciaként adódik át a rekurzióban. Ez drasztikusan csökkenti a memóriakezelési időt.
             
         - **Adatbiztonság (Data Race elkerülése):** A közös `temp` tömb használata a párhuzamos taszkok között teljesen biztonságos, mert a fa adott szintjén a szálak szigorúan diszjunkt (egymást nem átfedő) memóriatartományokba írnak és olvasnak.
 	        
@@ -77,7 +77,7 @@ Egy $n$ elemű tömb elemeinek növekvő sorrendbe történő rendezése $k$ pá
 			-  **Párhuzamos megvalósítás:** A párhuzamos összefésülést **Blokkokra bontással (Block Decomposition)** és **Bináris kereséssel** valósítottam meg. Így az OpenMP szálak egymástól teljesen független, diszjunkt memóriaterületeken tudtak dolgozni (elkerülve a Data Race-t), és a visszamásolás fázisát is párhuzamosítottam a maximális memória-sávszélesség kihasználásához.
             
 
-### 4. Odd-Even Merge Sort (Batcher-féle rendező hálózat)
+### 4. Odd-Even Merge Sort (Batcher-féle rendező hálózat)[^1]
 
 - **Komplexitás:** 
 	- Párhuzamos idő: $O(n\log^2 n)$
@@ -104,7 +104,7 @@ Egy $n$ elemű tömb elemeinek növekvő sorrendbe történő rendezése $k$ pá
 ## Mérések és következtetések
 ![sorting_benchmark_plot_full](pictures/sorting_benchmark_plot_full.png)
 ![sorting_benchmark_plot_full_log](pictures/sorting_benchmark_plot_full_log.png)
-![sorting_benchmark_plot_powerOfTwo](pictures/sorting_benchmark_plot_powerOfTwo.png)
+![sorting_benchmark_plot_powerOfTwo](pictures/sorting_benchmark_plot_powerOfTwo2.png)
 - A mérésen jól látszik, hogy a odd-even merge mindig kiegészíti a vektor méretét 2 hatványra, ezért ha a bemenetek 2 hatványok akkor jobban teljesítenek
 	- Az általam vártnál jelentősen rosszabbul teljesítettek, feltételezhetően mivel log négyzetes a komplexitásuk
 	- A forrásból amiből dolgoztam végtelen szállal számolva elérhető a $\log^2n$ 
@@ -114,3 +114,5 @@ Egy $n$ elemű tömb elemeinek növekvő sorrendbe történő rendezése $k$ pá
 - A merge sorthoz két féle implementációt írtam, a különbség a 2 között, hogy a 2-esben a merge részét is párhuzamosítottam az algoritmusnak. A merge-hez a küszöbérték 10 szeresét használtam. (A merge sort 2 mellett a küszöbérték skálázási faktorja látható)
 	- A első implemetáció kicsit jobban teljesített. Az overhead túl nagy lehet és a legtöbb esetben, már dolgozik az összes szál így igazából csak azoknak az ütemezését zavarja meg. Érdekes lehet megnézni, hogy csak az utolsó merge van párhuzamosítva, ahol már minden szál végzett a feladatával.
 	![sorting_benchmark_plot_3_mergeSort](pictures/sorting_benchmark_plot_3_mergeSort.png)
+
+[^1]: Forrás: Efficient parallel algorithms - Alan Gibbons, Wojciech Rytter

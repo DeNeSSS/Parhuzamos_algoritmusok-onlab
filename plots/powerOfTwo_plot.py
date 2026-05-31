@@ -2,6 +2,8 @@ import os
 import glob
 import pandas as pd
 import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.ticker import MaxNLocator, FixedLocator
 
 def create_plot(csv_files, output_filename, is_zoomed=False, top_x=None, names=None, plot_name=None, show=False):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
@@ -70,37 +72,55 @@ def create_plot(csv_files, output_filename, is_zoomed=False, top_x=None, names=N
 
     # --- DINAMIKUS ZOOM (Levágjuk az extrém kiugrókat) ---
     if is_zoomed and all_wall_values:
-        # A 80. percentilist vesszük alapul, és adunk neki egy kis margót (x1.3)
-        # Ez automatikusan levágja a nagyon lassú (pl. ThreadPool) vonalakat
         zoom_wall_limit = pd.Series(all_wall_values).quantile(0.80) * 1.3
         zoom_cpu_limit = pd.Series(all_cpu_values).quantile(0.80) * 1.3
         
         ax1.set_ylim(0, zoom_wall_limit)
         ax2.set_ylim(0, zoom_cpu_limit)
 
+    # --- ÁTVÁLTÓ FÜGGVÉNYEK A MÁSODLAGOS TENGELYHEZ ---
+    # Az alsó tengely értéke (x) millióban van megadva -> x * 1_000_000 az igazi méret
+    def mill_to_log2(x):
+        return np.log2(np.maximum(x * 1e6, 1))
+        
+    def log2_to_mill(k):
+        return (2**k) / 1e6
 
     # --- Bal oldali ábra (Wall Time) formázása ---
-    # ax1.set_xscale('log')
-    ax1.set_title("Futásidő", fontsize=14)
+    # A pad=25 eltolja a címet, hogy ne folyjon össze a felső tengely feliratával
+    ax1.set_title("Futásidő", fontsize=14, pad=25)
     ax1.set_xlabel("Vektor mérete (Millió elem)", fontsize=12)
     ax1.set_ylabel("Átlagos idő (másodperc)", fontsize=12)
     ax1.grid(True, linestyle=':', alpha=0.7)
     
-    # Legend pozíciója kívülre vagy a bal felső sarokba
+    # Másodlagos X-tengely hozzáadása felülre
+    secax1 = ax1.secondary_xaxis('top', functions=(mill_to_log2, log2_to_mill))
+    secax1.set_xlabel("Vektor mérete (2^x)", fontsize=12)
+    secax1.xaxis.set_major_locator(FixedLocator(np.arange(20, 30))) 
+    secax1.xaxis.set_major_formatter(plt.FuncFormatter(lambda val, pos: f"$2^{{{int(round(val))}}}$"))
+    
     ax1.legend(loc="upper left", fontsize=10)
 
     # --- Jobb oldali ábra (CPU Work) formázása ---
-    # ax2.set_xscale('log')
-    ax2.set_title("Összesített processzor munka", fontsize=14)
+    ax2.set_title("Összesített processzor munka", fontsize=14, pad=25)
     ax2.set_xlabel("Vektor mérete (Millió elem)", fontsize=12)
     ax2.set_ylabel("CPU idő (másodperc)", fontsize=12)
     ax2.grid(True, linestyle=':', alpha=0.7)
+    
+    # Másodlagos X-tengely hozzáadása felülre
+    secax2 = ax2.secondary_xaxis('top', functions=(mill_to_log2, log2_to_mill))
+    secax2.set_xlabel("Vektor mérete ($2^x$)", fontsize=12)
+    secax2.xaxis.set_major_locator(MaxNLocator(integer=True)) # Csak egész kitevők
+    secax2.xaxis.set_major_formatter(plt.FuncFormatter(lambda val, pos: f"$2^{{{int(round(val))}}}$"))
+    
     ax2.legend(loc="upper left", fontsize=10)
 
     if plot_name == None:
         plt.suptitle(f"Rendező Algoritmusok Teljesítménye", fontsize=18, fontweight='bold')
     else:
         plt.suptitle(plot_name, fontsize=18, fontweight='bold')
+    
+    # A passzoló elrendezés miatt fontos a rect beállítás, hogy a suptitle se lógjon bele semmibe
     plt.tight_layout()
     
     plt.savefig(output_filename, dpi=300)
@@ -113,8 +133,8 @@ def create_plot(csv_files, output_filename, is_zoomed=False, top_x=None, names=N
 
 
 def main():
-    dir_name = "change2"
-    data_dir = f"test_data/min_search/{dir_name}/"
+    dir_name = "powerOfTwo2"
+    data_dir = f"test_data/sorting/{dir_name}/"
     csv_files = glob.glob(os.path.join(data_dir, "*_results.csv"))
     
     if not csv_files:
@@ -126,32 +146,8 @@ def main():
     create_plot(csv_files, full_output, show=True)
 
     # 2. Zoomolt grafikon legenerálása (csak a gyorsak versenye látszik)
-    zoomed_output = os.path.join(data_dir, f"benchmark_plot_zoomed_{dir_name}.png")
-    create_plot(csv_files, zoomed_output, is_zoomed=True, show=True)
-
-    # 1. Teljes grafikon legenerálása (mindenki látszik)
-    best5 = os.path.join(data_dir, f"benchmark_plot_{dir_name}.png")
-    create_plot(csv_files, full_output, show=True)
-
-    # # 3.
-    # merge3 = os.path.join(data_dir, f"benchmark_plot_best5_{dir_name}.png")
-    # create_plot(csv_files, merge3, top_x=5, names=["Parallel Merge Sort", "Parallel Merge Sort 2 - 100", "Parallel Merge Sort 3"], show=True)
-
-    # 4. 
-    # bubble_output = os.path.join(data_dir, f"benchmark_plot_reduction_{dir_name}.png")
-    # create_plot(csv_files, bubble_output, 
-    #             names=["Serial Odd-Even Bubble", "Parallel Odd-Even Bubble"], 
-    #             plot_name="bubble sort algoritmusok",
-    #             show=True)
-
-    # # 5.
-    # tomorites_output = os.path.join(data_dir, f"benchmark_plot_compression_{dir_name}.png")
-    # create_plot(csv_files, tomorites_output,
-    #             names=["Serial", "OMP Compression", "Strided Compression", "Recursive Async"],
-    #             plot_name="Tömörítő algoritmusok",
-    #             )
-
-    
+    # zoomed_output = os.path.join(data_dir, f"benchmark_plot_zoomed_{dir_name}.png")
+    # create_plot(csv_files, zoomed_output, is_zoomed=True, show=True)
 
     print("\nSikeresen legeneráltam mindkét ábrát!")
 
